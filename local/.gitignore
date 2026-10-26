@@ -1,0 +1,4 @@
+# Local-only: generated secrets, source snapshots, state of the last seed run.
+.env
+.src/
+.state/
