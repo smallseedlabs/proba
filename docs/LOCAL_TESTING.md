@@ -160,7 +160,7 @@ stored, events say nothing about it and the portal shows no panel. `up.sh` runs 
 4. **Look at it through the API, as an admin and as a viewer** (the two static tokens exist for scripts only; they are refused in production):
    ```bash
    set -a; . .env; set +a
-   EV=$(./sql.sh "SELECT toString(event_id) FROM audit_events WHERE action='thread.message_received' AND content_digest IS NOT NULL ORDER BY occurred_at DESC LIMIT 1" | tail -n 1 | tr -d ' ')
+   EV=$(. ./lib.sh; load_env; ch "SELECT toString(event_id) FROM audit_events WHERE action='thread.message_received' AND content_digest IS NOT NULL ORDER BY occurred_at DESC LIMIT 1")   # plain id, no table
    curl -s -H "authorization: Bearer $AUDIT_API_LOCAL_TOKEN"        http://localhost:3400/v1/events/$EV/content | jq    # admin: text, kind, redactions, contentDigest, verified
    curl -s -H "authorization: Bearer $AUDIT_API_LOCAL_TOKEN"        http://localhost:3400/v1/events/$EV | jq            # admin: hasContent + contentDigest, never the text
    curl -s -H "authorization: Bearer $AUDIT_API_LOCAL_VIEWER_TOKEN" http://localhost:3400/v1/events/$EV | jq            # viewer: hasContent only
