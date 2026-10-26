@@ -72,7 +72,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: proba-local-redis
     # AOF on: the audit stream must survive a Redis restart. One Redis serves the Hub's
     # pub/sub (proba:events) and the audit stream (proba.audit.events), as in the Hub's own compose.
