@@ -267,9 +267,9 @@ else
     # stored apart from the chain: the text is in audit_event_content, never in audit_events
     in_events="$(chv "SELECT count() FROM audit_events WHERE position(concat(ifNull(details,''),' ',ifNull(error_message,'')), 'ops.lead@example.com') > 0 OR position(concat(ifNull(details,''),' ',ifNull(error_message,'')), '$RAW_SECRET') > 0")"
     [ "$in_events" = 0 ] && pass "the text is not in audit_events (its row holds only content_digest ${DIG:0:12}...)" || fail "message text found in $in_events audit_events rows"
-    [ "$row" = "user_message|1|0|${#RAW_TEXT}" ] && grep -q 'ops.lead@example.com' <<<"$stored_row" && grep -q '\[REDACTED\]' <<<"$stored_row" && ! grep -q "$RAW_SECRET" <<<"$stored_row" \
+    [ "$row" = "user_message|1|0|${#stored_row}" ] && grep -q 'ops.lead@example.com' <<<"$stored_row" && grep -q '\[REDACTED\]' <<<"$stored_row" && ! grep -q "$RAW_SECRET" <<<"$stored_row" \
       && pass "audit_event_content: kind user_message, 1 secret masked, ordinary text (the email address) kept, the password is gone" \
-      || fail "audit_event_content row is not as expected" "row=$row (want user_message|1|0|${#RAW_TEXT}); text=$(head -c 160 <<<"$stored_row")"
+      || fail "audit_event_content row is not as expected" "row=$row (want user_message|1|0|${#stored_row}: original_length is the length of the masked text); text=$(head -c 160 <<<"$stored_row")"
     leaked="$(chv "SELECT count() FROM audit_event_content WHERE position(text, '$RAW_SECRET') > 0 OR positionCaseInsensitive(text, 'abc123canary') > 0 OR position(text, 'seed-password-value') > 0")"
     [ "$leaked" = 0 ] && pass "no password, bearer string or seed secret in any stored text" || fail "$leaked stored texts still contain a secret"
 
