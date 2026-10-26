@@ -55,9 +55,15 @@ ensure_env() {
 
 load_env() {
   [ -f "$LOCAL_DIR/.env" ] || die "local/.env is missing: run ./up.sh first"
+  # Settings given on the command line (PROBA_SRC=worktree ./up.sh) win over local/.env.
+  local keep="" v
+  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR; do
+    if [ -n "${!v+x}" ]; then keep="$keep$v=$(printf '%q' "${!v}") "; fi
+  done
   set -a
   # shellcheck disable=SC1091
   . "$LOCAL_DIR/.env"
+  [ -z "$keep" ] || eval "$keep"
   set +a
   : "${WEB_HOST_PORT:=5180}" "${HUB_HOST_PORT:=3300}" "${POSTGRES_HOST_PORT:=55433}" "${REDIS_HOST_PORT:=56380}"
   : "${CLICKHOUSE_HTTP_HOST_PORT:=58125}" "${AUDIT_CONSUMER_HOST_PORT:=3401}" "${METRICS_INGESTER_HOST_PORT:=3402}"

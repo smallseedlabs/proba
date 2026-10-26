@@ -7,7 +7,7 @@
 #                                      v  | (+ dead letters: proba.audit.events.dlq)
 #   audit-consumer ---------> clickhouse (audit_events: append-only, hash-chained)
 #   metrics-ingester (stub) -> clickhouse (metric_observations) -> rollup -> metric_rollups_*
-#   audit-api (read API, static local token) ; profile "portal": the portal (enable once proba-portal has merged it)
+#   audit-api (read API, static local token) ; profile "portal": Proba Insights (the insights portal)
 #
 # Use the scripts (they load local/.env, pick the source snapshots and check ports):
 #   ./up.sh   ./status.sh   ./seed.sh   ./verify.sh   ./down.sh   ./reset.sh
@@ -279,8 +279,10 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------ profile "portal"
-  # Wired, not enabled by default: `./up.sh --portal` (or COMPOSE_PROFILES=portal). The portal
-  # needs its own Dockerfile (proba-portal is empty today); until then up.sh skips it with a notice.
+  # Proba Insights (proba-portal), opt in with `./up.sh --portal` (or COMPOSE_PROFILES=portal).
+  # It signs in with Firebase, so it needs the same FIREBASE_* web config as the web app and the
+  # audit API on AUDIT_API_TOKEN_VERIFIER=firebase (the static token cannot sign anyone in to a
+  # browser). The browser, not the container, calls the audit API, hence the published 127.0.0.1 address.
   # See docs/LOCAL_TESTING.md, "Portal profile".
   portal:
     profiles: ["portal"]
@@ -291,8 +293,20 @@ services:
     depends_on:
       - audit-api
     environment:
-      PORT: 8080
-      AUDIT_API_URL: http://audit-api:3100
+      API_BASE_URL: http://127.0.0.1:${AUDIT_API_HOST_PORT:-3400}
+      FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
+      # Optional feature flag: address of the memory console (adds a Memory entry). Empty: no entry.
+      MEMORY_URL: ${PORTAL_MEMORY_URL:-}
+      LOG_LEVEL: ${PORTAL_LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     ports:
       - "127.0.0.1:${PORTAL_HOST_PORT:-3410}:8080"
     restart: unless-stopped
