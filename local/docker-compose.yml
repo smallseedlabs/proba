@@ -1,0 +1,303 @@
+# Proba local platform. One project (proba-local), one command: ./up.sh
+#
+#   web (nginx) --HTTPS/SSE--> hub --> postgres        (the Hub's own database)
+#                               |
+#                               +--> redis (AOF)  <-- audit stream  proba.audit.events
+#                                      |  ^
+#                                      v  | (+ dead letters: proba.audit.events.dlq)
+#   audit-consumer ---------> clickhouse (audit_events: append-only, hash-chained)
+#   metrics-ingester (stub) -> clickhouse (metric_observations) -> rollup -> metric_rollups_*
+#   audit-api (read API, static local token) ; profile "portal": the portal (enable once proba-portal has merged it)
+#
+# Use the scripts (they load local/.env, pick the source snapshots and check ports):
+#   ./up.sh   ./status.sh   ./seed.sh   ./verify.sh   ./down.sh   ./reset.sh
+# Raw compose works too: docker compose -p proba-local --env-file .env -f docker-compose.yml ...
+name: proba-local
+
+x-clickhouse-env: &clickhouse-env
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: proba
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}
+  CLICKHOUSE_DATABASE: proba_audit
+
+x-audit-env: &audit-env
+  <<: *clickhouse-env
+  # Production-like: the stub connector only starts because ALLOW_STUB_CONNECTOR is set.
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  REDIS_URL: redis://redis:6379
+  EVENT_BUS: redis-streams
+  AUDIT_STORE: clickhouse
+  METRICS_STORE: clickhouse
+  CHECKPOINT_STORE: clickhouse
+  QUARANTINE_STORE: clickhouse
+  INGEST_WORKSPACE_ID: seedbed
+
+x-ingest-env: &ingest-env
+  <<: *audit-env
+  PLATFORM_CONNECTORS: ${PLATFORM_CONNECTORS:-meta:stub,google:stub}
+  ALLOW_STUB_CONNECTOR: "true"
+  INGEST_INTERVAL_MS: ${INGEST_INTERVAL_MS:-10000}
+  INGEST_INITIAL_LOOKBACK_HOURS: 72
+  ROLLUP_INTERVAL_MS: ${ROLLUP_INTERVAL_MS:-5000}
+  # The stub revises periods of the last 2 hours this often (up to 120 times).
+  STUB_RESTATE_EVERY_MINUTES: ${STUB_RESTATE_EVERY_MINUTES:-1}
+  STUB_RESTATE_REVISIONS: 120
+
+x-app-deps: &app-deps
+  clickhouse:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  audit-migrate:
+    condition: service_completed_successfully
+
+services:
+  # ------------------------------------------------------------------ data stores
+  postgres:
+    image: postgres:16-alpine
+    container_name: proba-local-postgres
+    environment:
+      POSTGRES_USER: proba
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}
+      POSTGRES_DB: proba_hub
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proba -d proba_hub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: proba-local-redis
+    # AOF on: the audit stream must survive a Redis restart. One Redis serves the Hub's
+    # pub/sub (proba:events) and the audit stream (proba.audit.events), as in the Hub's own compose.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-56380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: proba-local-clickhouse
+    environment:
+      CLICKHOUSE_USER: proba
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}
+      CLICKHOUSE_DB: proba_audit
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_HTTP_HOST_PORT:-58125}:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ------------------------------------------------------------------ hub + web
+  hub-migrate:
+    build:
+      context: ${HUB_SRC:-.src/proba-hub}
+    image: ${HUB_IMAGE:-proba-local/hub:dev}
+    container_name: proba-local-hub-migrate
+    command: ["node", "dist/db/migrate-cli.js"]
+    # Same image as the hub, whose HEALTHCHECK would turn this exited one-shot "unhealthy".
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      JWT_SECRET: ${JWT_SECRET:?run ./up.sh (it creates local/.env with generated secrets)}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    restart: "no"
+
+  hub:
+    build:
+      context: ${HUB_SRC:-.src/proba-hub}
+    image: ${HUB_IMAGE:-proba-local/hub:dev}
+    container_name: proba-local-hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      hub-migrate:
+        condition: service_completed_successfully
+    environment:
+      # development (not production) so POST /dev/login exists for seed.sh/verify.sh.
+      # Set DEV_LOGIN_ENABLED=false in local/.env to turn it off; sign-in then needs Firebase.
+      NODE_ENV: development
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?run ./up.sh (it creates local/.env with generated secrets)}
+      DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-true}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      AUTH_ALLOWED_EMAIL_DOMAINS: ${AUTH_ALLOWED_EMAIL_DOMAINS:-}
+      CORS_ORIGIN: http://localhost:${WEB_HOST_PORT:-5180},http://127.0.0.1:${WEB_HOST_PORT:-5180}
+      MOCK_BRAIN_SCENARIO: ${MOCK_BRAIN_SCENARIO:-happy_path}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Audit: transactional outbox -> relay -> Redis stream proba.audit.events
+      AUDIT_ENABLED: "true"
+      AUDIT_RELAY_ENABLED: "true"
+      AUDIT_RELAY_POLL_MS: 500
+      AUDIT_WORKSPACE_ID: seedbed
+    ports:
+      - "127.0.0.1:${HUB_HOST_PORT:-3300}:3000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ${WEB_SRC:-.src/proba-web}
+    image: ${WEB_IMAGE:-proba-local/web:dev}
+    container_name: proba-local-web
+    depends_on:
+      - hub
+    environment:
+      # Runtime config (docker/env.sh writes env-config.js); the browser calls the Hub on the host port.
+      API_BASE_URL: http://localhost:${HUB_HOST_PORT:-3300}
+      FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
+    # The image's own HEALTHCHECK uses `localhost`, which busybox wget resolves to ::1 while nginx
+    # listens on IPv4 only, so it reports unhealthy. Probe 127.0.0.1 instead (found by this stack).
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-5180}:8080"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ audit + metrics
+  audit-migrate:
+    build:
+      context: ${AUDIT_SRC:-.src/proba-audit}
+      target: migrate
+    image: ${AUDIT_MIGRATE_IMAGE:-proba-local/audit-migrate:dev}
+    container_name: proba-local-audit-migrate
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment: *audit-env
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  audit-consumer:
+    build:
+      context: ${AUDIT_SRC:-.src/proba-audit}
+      target: audit-consumer
+    image: ${AUDIT_CONSUMER_IMAGE:-proba-local/audit-consumer:dev}
+    container_name: proba-local-audit-consumer
+    depends_on: *app-deps
+    environment:
+      <<: *audit-env
+      PORT: 3101
+    ports:
+      - "127.0.0.1:${AUDIT_CONSUMER_HOST_PORT:-3401}:3101"
+    restart: unless-stopped
+
+  metrics-ingester:
+    build:
+      context: ${AUDIT_SRC:-.src/proba-audit}
+      target: metrics-ingester
+    image: ${METRICS_INGESTER_IMAGE:-proba-local/metrics-ingester:dev}
+    container_name: proba-local-metrics-ingester
+    depends_on: *app-deps
+    environment:
+      <<: *ingest-env
+      PORT: 3102
+    ports:
+      - "127.0.0.1:${METRICS_INGESTER_HOST_PORT:-3402}:3102"
+    restart: unless-stopped
+
+  rollup:
+    build:
+      context: ${AUDIT_SRC:-.src/proba-audit}
+      target: rollup
+    image: ${ROLLUP_IMAGE:-proba-local/rollup:dev}
+    container_name: proba-local-rollup
+    depends_on: *app-deps
+    environment:
+      <<: *ingest-env
+      PORT: 3103
+    ports:
+      - "127.0.0.1:${ROLLUP_HOST_PORT:-3403}:3103"
+    restart: unless-stopped
+
+  # Read API of the audit trail and metrics (proba-audit PR #5). Local sign-in uses the API's
+  # `static` token verifier (refused in production): the bearer token is AUDIT_API_LOCAL_TOKEN from
+  # local/.env, generated on first run. For a real Firebase sign-in set AUDIT_API_TOKEN_VERIFIER=firebase,
+  # FIREBASE_PROJECT_ID and AUDIT_API_ADMIN_EMAILS / AUDIT_API_ALLOWED_EMAILS in local/.env.
+  audit-api:
+    build:
+      context: ${AUDIT_SRC:-.src/proba-audit}
+      target: audit-api
+    image: ${AUDIT_API_IMAGE:-proba-local/audit-api:dev}
+    container_name: proba-local-audit-api
+    depends_on: *app-deps
+    environment:
+      <<: *ingest-env
+      NODE_ENV: development
+      PORT: 3100
+      AUDIT_API_TOKEN_VERIFIER: ${AUDIT_API_TOKEN_VERIFIER:-static}
+      AUDIT_API_STATIC_TOKENS: '[{"token":"${AUDIT_API_LOCAL_TOKEN:-}","subject":"local-admin","email":"local-admin@proba.local","emailVerified":true}]'
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      AUDIT_API_ADMIN_EMAILS: ${AUDIT_API_ADMIN_EMAILS:-local-admin@proba.local}
+      AUDIT_API_ALLOWED_EMAILS: ${AUDIT_API_ALLOWED_EMAILS:-}
+      AUDIT_API_ALLOWED_EMAIL_DOMAINS: ${AUDIT_API_ALLOWED_EMAIL_DOMAINS:-}
+      AUDIT_API_WORKSPACE_ID: seedbed
+      AUDIT_API_CORS_ORIGINS: http://localhost:${PORTAL_HOST_PORT:-3410},http://127.0.0.1:${PORTAL_HOST_PORT:-3410}
+      AUDIT_API_RATE_LIMITER: redis
+      AUDIT_API_SCOPE_SOURCE: connectors
+    ports:
+      - "127.0.0.1:${AUDIT_API_HOST_PORT:-3400}:3100"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ profile "portal"
+  # Wired, not enabled by default: `./up.sh --portal` (or COMPOSE_PROFILES=portal). The portal
+  # needs its own Dockerfile (proba-portal is empty today); until then up.sh skips it with a notice.
+  # See docs/LOCAL_TESTING.md, "Portal profile".
+  portal:
+    profiles: ["portal"]
+    build:
+      context: ${PORTAL_SRC:-.src/proba-portal}
+    image: ${PORTAL_IMAGE:-proba-local/portal:dev}
+    container_name: proba-local-portal
+    depends_on:
+      - audit-api
+    environment:
+      PORT: 8080
+      AUDIT_API_URL: http://audit-api:3100
+    ports:
+      - "127.0.0.1:${PORTAL_HOST_PORT:-3410}:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
