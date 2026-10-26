@@ -39,7 +39,7 @@ ensure_env() {
   fi
   local key
   for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN \
-             MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN; do
+             MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN ANCHOR_HMAC_KEY; do
     if ! grep -Eq "^${key}=.+" "$f"; then
       local val; val="$(openssl rand -hex 32)"
       # Rewrite the line without printing it; avoid sed -i (differs between macOS and Linux).
@@ -54,10 +54,11 @@ ensure_env() {
   done
   # Settings added after a local/.env was first created: append the local default, never touch a value that exists.
   local def
-  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse; do
+  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse \
+             "PORTAL_MEMORY_URL=http://127.0.0.1:3420"; do
     if ! grep -Eq "^${def%%=*}=" "$f"; then
       printf '%s\n' "$def" >> "$f"
-      info "added ${def%%=*}=${def#*=} to local/.env (raw text of events, see docs/LOCAL_TESTING.md)"
+      info "added ${def%%=*}=${def#*=} to local/.env (see docs/LOCAL_TESTING.md)"
     fi
   done
 }

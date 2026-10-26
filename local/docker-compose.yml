@@ -24,6 +24,8 @@ x-clickhouse-env: &clickhouse-env
 x-audit-env: &audit-env
   <<: *clickhouse-env
   # Production-like: the stub connector only starts because ALLOW_STUB_CONNECTOR is set.
+  # Anchors and leases must be durable in production (Brief 1): Redis for leases, Hub Postgres for
+  # signed chain-head anchors (table created on first use). Defaults of memory would refuse to start.
   NODE_ENV: production
   LOG_LEVEL: ${LOG_LEVEL:-info}
   REDIS_URL: redis://redis:6379
@@ -36,6 +38,10 @@ x-audit-env: &audit-env
   METRICS_STORE: clickhouse
   CHECKPOINT_STORE: clickhouse
   QUARANTINE_STORE: clickhouse
+  LEASE_STORE: redis
+  ANCHOR_STORE: postgres
+  ANCHOR_DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD:?run ./up.sh}@postgres:5432/proba_hub
+  ANCHOR_HMAC_KEY: ${ANCHOR_HMAC_KEY:?run ./up.sh (it creates local/.env with generated secrets)}
   INGEST_WORKSPACE_ID: seedbed
 
 x-ingest-env: &ingest-env
