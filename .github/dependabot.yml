@@ -4,11 +4,24 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(ci)"
+    # One pull request for all workflow action updates (majors included: they are runtime-only for CI).
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: "docker-compose"
     directory: "/local"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(docker)"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    # Base image / service major versions (node, nginx, postgres, redis, clickhouse) are upgraded deliberately.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
