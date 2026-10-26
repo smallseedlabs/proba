@@ -28,6 +28,10 @@ x-audit-env: &audit-env
   REDIS_URL: redis://redis:6379
   EVENT_BUS: redis-streams
   AUDIT_STORE: clickhouse
+  # Raw text of events (protocol 0.3.3): the same value for the consumer (stores it), the API (serves it to
+  # administrators) and the Hub (writes it). On locally; the stores below are created by migration 0008.
+  AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-true}
+  AUDIT_CONTENT_STORE: ${AUDIT_CONTENT_STORE:-clickhouse}
   METRICS_STORE: clickhouse
   CHECKPOINT_STORE: clickhouse
   QUARANTINE_STORE: clickhouse
@@ -162,6 +166,8 @@ services:
       AUDIT_RELAY_ENABLED: "true"
       AUDIT_RELAY_POLL_MS: 500
       AUDIT_WORKSPACE_ID: seedbed
+      # Raw text of messages, replies and explanations on audit events (secrets masked): see local/.env.example.
+      AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-true}
     ports:
       - "127.0.0.1:${HUB_HOST_PORT:-3300}:3000"
     restart: unless-stopped
@@ -265,10 +271,11 @@ services:
       NODE_ENV: development
       PORT: 3100
       AUDIT_API_TOKEN_VERIFIER: ${AUDIT_API_TOKEN_VERIFIER:-static}
-      AUDIT_API_STATIC_TOKENS: '[{"token":"${AUDIT_API_LOCAL_TOKEN:-}","subject":"local-admin","email":"local-admin@proba.local","emailVerified":true}]'
+      # Two static identities for automated local use only: an admin and a viewer (the viewer lets verify.sh prove raw text is admin-only).
+      AUDIT_API_STATIC_TOKENS: '[{"token":"${AUDIT_API_LOCAL_TOKEN:-}","subject":"local-admin","email":"local-admin@proba.local","emailVerified":true},{"token":"${AUDIT_API_LOCAL_VIEWER_TOKEN:-}","subject":"local-viewer","email":"local-viewer@proba.local","emailVerified":true}]'
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       AUDIT_API_ADMIN_EMAILS: ${AUDIT_API_ADMIN_EMAILS:-local-admin@proba.local}
-      AUDIT_API_ALLOWED_EMAILS: ${AUDIT_API_ALLOWED_EMAILS:-}
+      AUDIT_API_ALLOWED_EMAILS: ${AUDIT_API_ALLOWED_EMAILS:-local-viewer@proba.local}
       AUDIT_API_ALLOWED_EMAIL_DOMAINS: ${AUDIT_API_ALLOWED_EMAIL_DOMAINS:-}
       AUDIT_API_WORKSPACE_ID: seedbed
       AUDIT_API_CORS_ORIGINS: http://localhost:${PORTAL_HOST_PORT:-3410},http://127.0.0.1:${PORTAL_HOST_PORT:-3410}

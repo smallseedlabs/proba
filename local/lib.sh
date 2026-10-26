@@ -28,7 +28,7 @@ need() {
 }
 
 # ---------------------------------------------------------------- env file
-# Create local/.env from the example on first run and fill the three secrets with random,
+# Create local/.env from the example on first run and fill the secrets with random,
 # local-only values. Existing values are never overwritten. Nothing is printed.
 ensure_env() {
   local f="$LOCAL_DIR/.env"
@@ -38,7 +38,7 @@ ensure_env() {
     info "created local/.env from local/.env.example (gitignored, mode 600)"
   fi
   local key
-  for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN; do
+  for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN; do
     if ! grep -Eq "^${key}=.+" "$f"; then
       local val; val="$(openssl rand -hex 32)"
       # Rewrite the line without printing it; avoid sed -i (differs between macOS and Linux).
@@ -49,6 +49,14 @@ ensure_env() {
       fi
       chmod 600 "$f"
       info "generated a local-only $key in local/.env"
+    fi
+  done
+  # Settings added after a local/.env was first created: append the local default, never touch a value that exists.
+  local def
+  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse; do
+    if ! grep -Eq "^${def%%=*}=" "$f"; then
+      printf '%s\n' "$def" >> "$f"
+      info "added ${def%%=*}=${def#*=} to local/.env (raw text of events, see docs/LOCAL_TESTING.md)"
     fi
   done
 }

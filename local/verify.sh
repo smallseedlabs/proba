@@ -146,8 +146,8 @@ emails="$(chv "SELECT count() FROM audit_events WHERE match($TEXTS, '[A-Za-z0-9.
 [ "$emails" = 0 ] && pass "no email-shaped string in any event" || fail "$emails events contain an email-shaped string" "$(ch "SELECT service, action FROM audit_events WHERE match($TEXTS, '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+[.][A-Za-z]{2,}') LIMIT 3" | tr '\n' ';')"
 secrets="$(chv "SELECT count() FROM audit_events WHERE match($TEXTS, '(?i)bearer[[:space:]]+[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{5,}[.][A-Za-z0-9_-]{5,}[.]')")"
 [ "$secrets" = 0 ] && pass "no bearer token or JWT in any event" || fail "$secrets events contain a bearer token or JWT"
-canary="$(chv "SELECT count() FROM audit_events WHERE positionCaseInsensitive($TEXTS, 'canary-brief') > 0 OR positionCaseInsensitive($TEXTS, 'abc123canary') > 0 OR positionCaseInsensitive($TEXTS, 'seed.canary') > 0")"
-[ "$canary" = 0 ] && pass "the message text seed.sh sent (with a canary email and bearer string) is not stored anywhere" || fail "canary text found in $canary events"
+canary="$(chv "SELECT count() FROM audit_events WHERE positionCaseInsensitive($TEXTS, 'canary-brief') > 0 OR positionCaseInsensitive($TEXTS, 'abc123canary') > 0 OR positionCaseInsensitive($TEXTS, 'seed.canary') > 0 OR positionCaseInsensitive($TEXTS, 'seed-password-value') > 0")"
+[ "$canary" = 0 ] && pass "the message text seed.sh sent (canary email, bearer string, a password) is not in audit_events: only its digest is (the text, if enabled, is in audit_event_content, see step 12)" || fail "message text found in $canary events"
 if [ -n "$TOKEN" ]; then
   mine="$(chv "SELECT count() FROM audit_events WHERE position($TEXTS, '$TOKEN') > 0")"
   [ "$mine" = 0 ] && pass "this run's session token appears in no event" || fail "the session token is stored in $mine events"
@@ -243,6 +243,76 @@ else
   if grep -q 'exit=[1-9]' <<<"$out" && grep -qi 'stub' <<<"$out"; then
     pass "PLATFORM_CONNECTORS=meta:not-a-library: refused at start-up, the message lists the available adapters (stub)"
   else fail "an unknown connector name was not refused with the list of adapters" "$(tail -n 3 <<<"$out" | cut -c1-200 | tr '\n' ' ')"; fi
+fi
+
+# ------------------------------------------------------------------ 12. raw text
+step "12. raw text of events (protocol 0.3.3): stored apart, secrets masked, admin-only, covered by the hash chain"
+VTOKEN="${AUDIT_API_LOCAL_VIEWER_TOKEN:-}"
+if [ "${AUDIT_CONTENT_ENABLED:-true}" != true ]; then skip "raw text checks" "AUDIT_CONTENT_ENABLED is false in local/.env: the text is never stored (set it to true, ./up.sh, ./seed.sh)"
+elif [ -z "$TOKEN" ]; then skip "raw text checks" "no Hub session"
+elif [ "${AUDIT_API_TOKEN_VERIFIER:-static}" != static ] || [ -z "$ATOKEN" ] || [ -z "$VTOKEN" ]; then
+  skip "raw text checks" "they need the audit API's static tokens (AUDIT_API_TOKEN_VERIFIER=static, AUDIT_API_LOCAL_TOKEN and AUDIT_API_LOCAL_VIEWER_TOKEN); with Firebase sign-in follow docs/LOCAL_TESTING.md, 'See raw text in the portal'"
+else
+  RAW_SECRET="verify-secret-$(date +%s)-x9"
+  RAW_TEXT="Raise the daily budget to 120 GBP and mail the report to ops.lead@example.com. The login is password: $RAW_SECRET"
+  hub_post "$TOKEN" send_message "$(jq -nc --arg x "$RAW_TEXT" '{text:$x}')"
+  CT="$LAST_ID"
+  [ "$LAST_STATUS" = accepted ] && pass "a message with an email address and a password went through the Hub ($CT)" || fail "the Hub did not accept the message" "status $LAST_STATUS"
+  stored_text() { [ "$(chv "SELECT count() FROM audit_events WHERE trace_id='$CT' AND action='thread.message_received' AND content_digest IS NOT NULL")" -ge 1 ] 2>/dev/null; }
+  if ! wait_until 60 "the message event (with its digest) in ClickHouse" stored_text; then
+    fail "the event with its text digest never reached ClickHouse" "AUDIT_CONTENT_ENABLED must be true for the Hub, the consumer and the API (docker compose -p $PROJECT logs hub audit-consumer); migration 0008 must have run (./up.sh does it)"
+  else
+    EV="$(ch "SELECT toString(event_id) FROM audit_events WHERE trace_id='$CT' AND action='thread.message_received' LIMIT 1" | tr -d '[:space:]')"
+    DIG="$(ch "SELECT content_digest FROM audit_events WHERE event_id='$EV'" | tr -d '[:space:]')"
+    row="$(ch "SELECT concat(kind,'|',toString(redactions),'|',toString(truncated),'|',toString(original_length)) FROM audit_event_content FINAL WHERE event_id='$EV'" | tr -d '\n')"
+    stored_row="$(ch "SELECT text FROM audit_event_content FINAL WHERE event_id='$EV'")"
+    # stored apart from the chain: the text is in audit_event_content, never in audit_events
+    in_events="$(chv "SELECT count() FROM audit_events WHERE position(concat(ifNull(details,''),' ',ifNull(error_message,'')), 'ops.lead@example.com') > 0 OR position(concat(ifNull(details,''),' ',ifNull(error_message,'')), '$RAW_SECRET') > 0")"
+    [ "$in_events" = 0 ] && pass "the text is not in audit_events (its row holds only content_digest ${DIG:0:12}...)" || fail "message text found in $in_events audit_events rows"
+    [ "$row" = "user_message|1|0|${#stored_row}" ] && grep -q 'ops.lead@example.com' <<<"$stored_row" && grep -q '\[REDACTED\]' <<<"$stored_row" && ! grep -q "$RAW_SECRET" <<<"$stored_row" \
+      && pass "audit_event_content: kind user_message, 1 secret masked, ordinary text (the email address) kept, the password is gone" \
+      || fail "audit_event_content row is not as expected" "row=$row (want user_message|1|0|${#stored_row}: original_length is the length of the masked text); text=$(head -c 160 <<<"$stored_row")"
+    leaked="$(chv "SELECT count() FROM audit_event_content WHERE position(text, '$RAW_SECRET') > 0 OR positionCaseInsensitive(text, 'abc123canary') > 0 OR position(text, 'seed-password-value') > 0")"
+    [ "$leaked" = 0 ] && pass "no password, bearer string or seed secret in any stored text" || fail "$leaked stored texts still contain a secret"
+
+    # admin: the text, with proof
+    ac="$(acurl "$API/v1/events/$EV/content" -H "authorization: Bearer $ATOKEN")"
+    if [ "$(jq -r '.content.kind' <<<"$ac")" = user_message ] && [ "$(jq -r '.content.text' <<<"$ac")" = "$stored_row" ] && [ "$(jq -r '.content.redactions' <<<"$ac")" = 1 ]; then
+      pass "admin: GET /v1/events/{id}/content returns the masked text, kind user_message, redactions 1"
+    else fail "admin content read is not as expected" "$(head -c 300 <<<"$ac")"; fi
+    calc="$(jq -S -c '.content' <<<"$ac" | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+    if [ "$(jq -r '.verified' <<<"$ac")" = true ] && [ "$(jq -r '.contentDigest' <<<"$ac")" = "$DIG" ] && [ "$calc" = "$DIG" ]; then
+      pass "digest verifies: sha256 of the returned text, computed here, equals the content_digest stored in the chain and the API says verified"
+    else fail "digest does not verify" "stored=$DIG api=$(jq -r '.contentDigest' <<<"$ac") computed=$calc verified=$(jq -r '.verified' <<<"$ac")"; fi
+    ae="$(acurl "$API/v1/events/$EV" -H "authorization: Bearer $ATOKEN")"
+    if [ "$(jq -r '.hasContent' <<<"$ae")" = true ] && [ "$(jq -r '.contentDigest' <<<"$ae")" = "$DIG" ] && ! jq -e 'has("content")' <<<"$ae" >/dev/null && ! grep -q 'ops.lead@example.com' <<<"$ae"; then
+      pass "admin: GET /v1/events/{id} says hasContent and shows the digest, never the text"
+    else fail "the event route for an admin is not as expected" "$(head -c 300 <<<"$ae")"; fi
+    at="$(acurl "$API/v1/traces/$CT/content" -H "authorization: Bearer $ATOKEN")"
+    [ "$(jq -r --arg e "$EV" '[.items[] | select(.eventId==$e)] | length' <<<"$at")" = 1 ] && pass "admin: GET /v1/traces/{id}/content lists the text of the trace" || fail "trace content does not list the event" "$(head -c 300 <<<"$at")"
+
+    # viewer: never the text, never the digest
+    ve="$(acurl "$API/v1/events/$EV" -H "authorization: Bearer $VTOKEN")"
+    vs="$(acurl "$API/v1/events?traceId=$CT&limit=200" -H "authorization: Bearer $VTOKEN")"
+    vt="$(acurl "$API/v1/traces/$CT" -H "authorization: Bearer $VTOKEN")"
+    if [ "$(jq -r '.hasContent' <<<"$ve")" = true ] && ! jq -e 'has("contentDigest") or has("content")' <<<"$ve" >/dev/null \
+      && ! grep -q -e 'ops.lead@example.com' -e "$RAW_SECRET" -e "$DIG" <<<"$ve$vs$vt"; then
+      pass "viewer: sees hasContent only; no text and no digest in the event, the search or the trace"
+    else fail "a viewer received raw text or a digest" "$(head -c 300 <<<"$ve")"; fi
+    vc="$(acurl -o /dev/null -w '%{http_code}' "$API/v1/events/$EV/content" -H "authorization: Bearer $VTOKEN")"
+    vtc="$(acurl -o /dev/null -w '%{http_code}' "$API/v1/traces/$CT/content" -H "authorization: Bearer $VTOKEN")"
+    nc="$(acurl -o /dev/null -w '%{http_code}' "$API/v1/events/$EV/content")"
+    [ "$vc" = 403 ] && [ "$vtc" = 403 ] && [ "$nc" = 401 ] && pass "viewer: both content routes answer 403; without a token 401" || fail "content routes: viewer event=$vc trace=$vtc, no token=$nc (want 403, 403, 401)"
+
+    # the reads of raw text are themselves audited, without the text
+    audited() { [ "$(chv "SELECT countIf(action IN ('audit.event_viewed','audit.trace_viewed') AND position(ifNull(details,''), 'contentIncluded') > 0) FROM audit_events WHERE service='audit-api'")" -ge 2 ]; }
+    if wait_until 40 "the audit events of the content reads" audited; then
+      leak="$(chv "SELECT count() FROM audit_events WHERE service='audit-api' AND (position(ifNull(details,''), 'ops.lead@example.com') > 0 OR position(ifNull(details,''), '$RAW_SECRET') > 0)")"
+      [ "$leak" = 0 ] && pass "content reads are audited (audit.event_viewed / audit.trace_viewed with contentIncluded), and those records hold no text" || fail "the audit records of content reads contain text ($leak)"
+    else fail "no audit.event_viewed / audit.trace_viewed with contentIncluded for the content reads above"; fi
+    vc3="$(verify_chain "$CH_DB" seedbed)"
+    [ "$(jq -r '.ok' <<<"$vc3" 2>/dev/null)" = true ] && pass "hash chain intact with the digests in it (verifyChain: $(jq -r .checked <<<"$vc3") events, text checked by digest)" || fail "chain broken" "$(head -c 300 <<<"$vc3")"
+  fi
 fi
 
 # ------------------------------------------------------------------ summary
