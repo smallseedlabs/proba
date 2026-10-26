@@ -41,6 +41,12 @@ if [ "$BUILD" = 1 ]; then
   info "building images (full log: local/.state/build.log)"
   dc build --progress=plain >"$LOCAL_DIR/.state/build.log" 2>&1 || { tail -n 40 "$LOCAL_DIR/.state/build.log" >&2; die "image build failed (see local/.state/build.log)"; }
 fi
+# The ClickHouse migrations (including 0008, the table for the raw text of events) must have run before the
+# audit-consumer starts: with AUDIT_CONTENT_ENABLED it writes the text there first. compose also waits for
+# audit-migrate, but running it here makes it explicit, and applies a new migration to an existing volume.
+step "ClickHouse migrations"
+dc up -d --wait clickhouse >/dev/null 2>&1 || dc up -d clickhouse >/dev/null
+dc run --rm --no-deps -T audit-migrate 2>&1 | tail -n 4 || die "the ClickHouse migrations failed: docker compose -p $PROJECT logs clickhouse"
 dc up -d
 
 if [ "$WAIT" = 1 ]; then

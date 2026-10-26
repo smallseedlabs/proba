@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drive the Hub through POST /v1/commands exactly like proba-web does, to generate varied audit
 # traffic: three goals (approve path, decline path, plan rejected), messages, an explain, pause /
-# resume / emergency stop, a foreign thread, invalid payloads, a duplicate command, an SSE
+# resume / emergency stop, messages with raw text (one with a masked password), a foreign thread, invalid payloads, a duplicate command, an SSE
 # connect/disconnect and an unauthenticated call. Prints the traceId of every step.
 #
 # Session: HUB_SESSION_TOKEN (a real Firebase sign-in, see docs/LOCAL_TESTING.md) if set in
@@ -86,9 +86,12 @@ goal_flow "B decline path" "Try a bigger budget on retargeting" decline
 goal_flow "C plan rejected" "Launch a second landing page" reject_plan
 
 step "messages, explain, control"
-# The canary text must never reach the audit trail (verify.sh looks for it).
+# The canary's bearer string is a secret: it must never reach the audit trail, in any form (verify.sh looks for it).
+# Its other words are ordinary text, which the raw-text store keeps for administrators (AUDIT_CONTENT_ENABLED).
 CANARY='canary-brief mail seed.canary@example.com Bearer abc123canary'
-hub_post "$TOKEN" send_message "$(jq -nc --arg x "$CANARY" '{text:$x}')" "$THREAD_A"; t="$LAST_ID"; note "send_message (text is never stored)" "$t" "$LAST_STATUS"
+hub_post "$TOKEN" send_message "$(jq -nc --arg x "$CANARY" '{text:$x}')" "$THREAD_A"; t="$LAST_ID"; note "send_message (bearer string masked)" "$t" "$LAST_STATUS"
+# Raw text through the Hub's real flow: ordinary words stay as written, a password is masked and counted.
+hub_post "$TOKEN" send_message '{"text":"Raise the daily budget of the spring launch campaign to 180 GBP. Use the ad account login, password: seed-password-value-42, and send the weekly report to finance@example.com."}' "$THREAD_A"; t="$LAST_ID"; note "send_message with a password (masked)" "$t" "$LAST_STATUS"
 hub_post "$TOKEN" send_message '{"text":"First message in a brand new thread"}'; t="$LAST_ID"; note "send_message, new thread" "$t" "$LAST_STATUS"
 hub_post "$TOKEN" explain '{"targetRef":"campaign-1"}' "$THREAD_A"; t="$LAST_ID"; note "explain" "$t" "$LAST_STATUS"
 for a in pause resume kill; do
@@ -128,6 +131,14 @@ while [ "$i" -lt 40 ]; do
 done
 info "hub audit events: $a in the outbox, $b in ClickHouse"
 ch_pretty "SELECT action, count() AS events FROM audit_events WHERE service='hub' AND trace_id IN ($traces) GROUP BY action ORDER BY action"
+if [ "$(ch "SELECT count() FROM system.tables WHERE database='$CH_DB' AND name='audit_event_content'" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
+  info ""
+  info "raw text stored apart from the chain (audit_event_content; only the digest is in audit_events; admin-only through the audit API):"
+  ch_pretty "SELECT kind, count() AS texts, sum(redactions) AS secrets_masked, max(original_length) AS longest FROM audit_event_content FINAL GROUP BY kind ORDER BY kind"
+else
+  info ""
+  info "(raw text is not stored: AUDIT_CONTENT_ENABLED is false, or the 0008 migration has not run; see docs/LOCAL_TESTING.md)"
+fi
 info ""
 info "Traces are saved in local/.state/seed-traces.tsv. Inspect one:"
 first="$(sed -n 1p "$STATE" | cut -f2)"
