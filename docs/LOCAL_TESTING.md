@@ -115,9 +115,20 @@ and a second session that signs out. It prints a table of the audit actions it p
 
 ## Portal profile
 
-`proba-portal` is not merged yet, so `./up.sh --portal` currently starts the platform and prints that the portal has no Dockerfile. When it has one,
-`./up.sh --portal` builds it from `local/.src/proba-portal` (snapshot of its main), and serves it on http://localhost:3410 with `AUDIT_API_URL=http://audit-api:3100`. The audit API already allows the
-portal's origin through `AUDIT_API_CORS_ORIGINS`. The portal's container port and environment names in `docker-compose.yml` are assumptions; adjust them to the portal's Dockerfile.
+`./up.sh --portal` also builds and starts **Proba Insights** (`proba-portal`: Audit Explorer, Trace View, Integrity, Analytics) and serves it on http://localhost:3410
+(`PORTAL_HOST_PORT`). It is a read-only client of the audit API, which already allows its origin through `AUDIT_API_CORS_ORIGINS`.
+
+The portal signs in with **Firebase** and sends the ID token to the audit API, so it needs the same two things as the "web app with your real Firebase project" above:
+
+1. The Firebase web config in `local/.env` (`FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_APP_ID`, shared with the web app). Without them the portal opens
+   and says that sign-in has not been set up. Add `localhost` to the Firebase authorized domains.
+2. The audit API on Firebase tokens: `AUDIT_API_TOKEN_VERIFIER=firebase` and your email in `AUDIT_API_ADMIN_EMAILS` (administrator: sees Integrity) or `AUDIT_API_ALLOWED_EMAILS`
+   (read access). The static local token is for scripts only and cannot sign anyone in to a browser. `up.sh --portal` warns if either is missing.
+
+`PORTAL_MEMORY_URL` (optional) turns on the Memory entry in the portal's navigation; leave it empty for no entry. `PORTAL_LOG_LEVEL` sets its browser log level.
+After `./seed.sh` there is audit history and analytics data to look at. `./status.sh` reports the portal's health when its container exists.
+
+By default the portal is built from a snapshot of `origin/main` of your `proba-portal` checkout. To try an unmerged branch use `PROBA_SRC=worktree ./up.sh --portal`.
 
 ## Troubleshooting
 

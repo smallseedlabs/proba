@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the whole local platform with one command:  ./up.sh
-#   --portal      also start the portal profile (the portal, once proba-portal has a Dockerfile)
+#   --portal      also start Proba Insights (proba-portal); needs the Firebase settings, see docs/LOCAL_TESTING.md
 #   --no-build    do not rebuild images (reuse proba-local/*:dev, or images you pulled via *_IMAGE)
 #   --no-wait     do not wait for the services to become healthy
 set -euo pipefail
@@ -30,7 +30,11 @@ info "all host ports are free (or already ours)"
 step "build and start (project $PROJECT)"
 if [ "$PORTAL" = 1 ]; then
   if [ -f "$PORTAL_SRC/Dockerfile" ]; then export COMPOSE_PROFILES=portal
-  else warn "proba-portal has no Dockerfile yet (it has not merged one): starting the platform without the portal"; PORTAL=0; fi
+  else warn "proba-portal has no Dockerfile in $PORTAL_SRC (not merged to the snapshotted ref? try PROBA_SRC=worktree): starting the platform without the portal"; PORTAL=0; fi
+fi
+if [ "$PORTAL" = 1 ]; then
+  [ "${AUDIT_API_TOKEN_VERIFIER:-static}" = "firebase" ] || warn "the portal signs in with Firebase ID tokens, but the audit API is on AUDIT_API_TOKEN_VERIFIER=${AUDIT_API_TOKEN_VERIFIER:-static}: set it to firebase in local/.env (see docs/LOCAL_TESTING.md, Portal profile)"
+  [ -n "${FIREBASE_API_KEY:-}" ] && [ -n "${FIREBASE_AUTH_DOMAIN:-}" ] && [ -n "${FIREBASE_PROJECT_ID:-}" ] && [ -n "${FIREBASE_APP_ID:-}" ] || warn "FIREBASE_API_KEY, FIREBASE_AUTH_DOMAIN, FIREBASE_PROJECT_ID and FIREBASE_APP_ID are not all set in local/.env: the portal will say that sign-in has not been set up"
 fi
 if [ "$BUILD" = 1 ]; then
   mkdir -p "$LOCAL_DIR/.state"
@@ -49,13 +53,15 @@ if [ "$WAIT" = 1 ]; then
 fi
 step "status"
 "$LOCAL_DIR/status.sh" || true
+PORTAL_LINE=""
+[ "$PORTAL" = 1 ] && PORTAL_LINE=$'\n'"  Proba Insights http://localhost:${PORTAL_HOST_PORT}   (health: /health)"
 cat <<MSG
 
 Platform is up.
   Web            http://localhost:${WEB_HOST_PORT}
   Hub API        http://localhost:${HUB_HOST_PORT}   (health: /health)
   Audit API      http://localhost:${AUDIT_API_HOST_PORT}   (/health, /v1/..., bearer token AUDIT_API_LOCAL_TOKEN in local/.env)
-  ClickHouse     http://localhost:${CLICKHOUSE_HTTP_HOST_PORT}   (user proba, password in local/.env)
+  ClickHouse     http://localhost:${CLICKHOUSE_HTTP_HOST_PORT}   (user proba, password in local/.env)${PORTAL_LINE}
 Next:  ./seed.sh   (generate varied traffic)   then   ./verify.sh   (PASS/FAIL checks)
 Docs:  docs/LOCAL_TESTING.md
 MSG
