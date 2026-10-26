@@ -106,9 +106,11 @@ else
   if [ "$cur" = "AUD,GBP,USD" ] && jq -e '.totals | all(.clicks > 0 and .spend > 0)' <<<"$sm" >/dev/null; then
     pass "GET /v1/analytics/summary: one total per currency ($cur), never added together"
   else fail "GET /v1/analytics/summary" "currencies=$cur $(head -c 200 <<<"$sm")"; fi
-  api_reads() { [ "$(chv "SELECT countIf(action IN ('data_access.read','data_access.audit_trace','data_access.audit_query','data_access.metrics_summary')) FROM audit_events WHERE service='audit-api'")" -ge 2 ]; }
+  # The API records reads with the protocol's specific actions (audit-api 0.3.2+): audit.* for the trail, analytics.* for metrics.
+  read_actions="'audit.searched','audit.event_viewed','audit.trace_viewed','audit.integrity_checked','analytics.queried','analytics.compared'"
+  api_reads() { [ "$(chv "SELECT countIf(action IN ($read_actions)) FROM audit_events WHERE service='audit-api'")" -ge 2 ]; }
   if wait_until 40 "the audit-api's own audit events" api_reads; then
-    pass "reads are audited: the audit-api wrote $(chv "SELECT countIf(startsWith(action,'data_access.')) FROM audit_events WHERE service='audit-api'") data_access.* events about the reads above"
+    pass "reads are audited: the audit-api wrote $(chv "SELECT countIf(action IN ($read_actions)) FROM audit_events WHERE service='audit-api'") audit.*/analytics.* events about the reads above"
   else fail "no audit event for the API reads"; fi
 fi
 

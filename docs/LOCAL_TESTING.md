@@ -88,16 +88,16 @@ and a second session that signs out. It prints a table of the audit actions it p
 | 8 | **Days are per-account timezone days.** A daily bucket is the account's local day, DST included. | step 10: three accounts per platform in London, New York and Sydney; `bucket_date = toDate(bucket_start, timezone)`; a Sydney day starts at 13:00 UTC (11:00 offset), New York at 04:00, London at 23:00 UTC in British summer time and 00:00 after the clocks change. Money stays per currency (GBP, USD, AUD, never added up). | auto |
 | 9 | **Swap a connector by configuration.** | The ingester runs `PLATFORM_CONNECTORS=meta:stub,google:stub` with `ALLOW_STUB_CONNECTOR=true` (the stub is refused unless allowed). Step 11 starts a throwaway ingester with `meta:not-a-library` and shows it refuses to start and lists the available adapters. A real connector later is a new adapter and a changed value here. | auto |
 | 10 | **Swap an interface by configuration.** | Step 11 starts a throwaway ingester with `EVENT_BUS=memory AUDIT_STORE=memory METRICS_STORE=memory CHECKPOINT_STORE=memory QUARANTINE_STORE=memory`: same code, in-memory adapters. To run the real services that way, set the variables in `x-audit-env` in `docker-compose.yml`. | auto |
-| 11 | **Read API enforces who sees what.** Workspace comes from configuration, roles are viewer and admin, reads are audited. | step 3: no token is 401, a `workspaceId` parameter is 400, the local token is admin of `seedbed`, and the API's own reads appear as `data_access.*` events. | auto |
+| 11 | **Read API enforces who sees what.** Workspace comes from configuration, roles are viewer and admin, reads are audited. | step 3: no token is 401, a `workspaceId` parameter is 400, the local token is admin of `seedbed`, and the API's own reads appear as `audit.*` / `analytics.*` events. | auto |
 | 12 | **Hub safety paths are audited.** Denials, kill switch, sign-out. | `seed.sh` then `./sql.sh "SELECT action, outcome, count() FROM audit_events WHERE service='hub' AND (outcome != 'success' OR action LIKE 'control.%' OR action LIKE 'auth.%') GROUP BY action, outcome"`. | by hand |
 
 ### Known results
 
 `verify.sh` reports these honestly; they are findings about the code under test, not about the local setup:
 
-* **Step 5 "other services store generic/alias actions" fails**: the audit API writes `data_access.read` (a *generic* name in the catalog; its preferred names are
-  `stream.connected`, `stream.disconnected`, `memory.retrieved`) for event and trace lookups. The catalog has no specific name for "read audit data". Either the catalog needs
-  one (and the API should use it) or the API should use a name that is registered. The Hub itself is clean.
+* **Step 5 "other services store generic/alias actions"**: earlier audit-api builds wrote `data_access.read` (a *generic* catalog name). Since protocol 0.3.2 the catalog has
+  `audit.searched`, `audit.event_viewed`, `audit.trace_viewed`, `audit.integrity_checked`, `analytics.queried`, `analytics.compared`, and audit-api uses them. If this step still
+  fails, the audit images were built from a version older than that change: rebuild them (`PROBA_REF` / `AUDIT_SRC`) and `reset.sh`, since old events stay in ClickHouse.
 * **ClickHouse privileges**: the `proba` user created by the images can `ALTER TABLE audit_events UPDATE/DELETE` (the tamper demo uses exactly that on a copy). In production the
   consumer's user should have `INSERT` and `SELECT` only, and the API's `SELECT` only.
 
