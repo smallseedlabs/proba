@@ -3,7 +3,7 @@ Validate product market fit quickly. Build your idea get out of the box capabili
 
 ## Run the whole platform locally
 
-One command starts the Hub, web app, audit pipeline, audit API and the metrics pipeline (stub data) on your machine, and `local/verify.sh` checks it against the design. See [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md).
+One command starts the Hub, web app, audit pipeline, audit API and the metrics pipeline (stub data) on your machine (add `--memory` for the memory service, `--portal` for Proba Insights), and `local/verify.sh` checks it against the design. See [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md).
 
 ```bash
 cd local && ./up.sh && ./seed.sh && ./verify.sh

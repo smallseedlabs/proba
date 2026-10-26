@@ -38,7 +38,8 @@ ensure_env() {
     info "created local/.env from local/.env.example (gitignored, mode 600)"
   fi
   local key
-  for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN; do
+  for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN \
+             MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN; do
     if ! grep -Eq "^${key}=.+" "$f"; then
       local val; val="$(openssl rand -hex 32)"
       # Rewrite the line without printing it; avoid sed -i (differs between macOS and Linux).
@@ -65,7 +66,7 @@ load_env() {
   [ -f "$LOCAL_DIR/.env" ] || die "local/.env is missing: run ./up.sh first"
   # Settings given on the command line (PROBA_SRC=worktree ./up.sh) win over local/.env.
   local keep="" v
-  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR; do
+  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR PROBA_MEMORY_DIR; do
     if [ -n "${!v+x}" ]; then keep="$keep$v=$(printf '%q' "${!v}") "; fi
   done
   set -a
@@ -76,8 +77,10 @@ load_env() {
   : "${WEB_HOST_PORT:=5180}" "${HUB_HOST_PORT:=3300}" "${POSTGRES_HOST_PORT:=55433}" "${REDIS_HOST_PORT:=56380}"
   : "${CLICKHOUSE_HTTP_HOST_PORT:=58125}" "${AUDIT_CONSUMER_HOST_PORT:=3401}" "${METRICS_INGESTER_HOST_PORT:=3402}"
   : "${ROLLUP_HOST_PORT:=3403}" "${AUDIT_API_HOST_PORT:=3400}" "${PORTAL_HOST_PORT:=3410}"
+  : "${MEMORY_POSTGRES_HOST_PORT:=55434}" "${MEMORY_API_HOST_PORT:=3420}" "${MEMORY_INGESTOR_HOST_PORT:=3421}" "${MEMORY_JOBS_HOST_PORT:=3422}"
   export WEB_HOST_PORT HUB_HOST_PORT POSTGRES_HOST_PORT REDIS_HOST_PORT CLICKHOUSE_HTTP_HOST_PORT
   export AUDIT_CONSUMER_HOST_PORT METRICS_INGESTER_HOST_PORT ROLLUP_HOST_PORT AUDIT_API_HOST_PORT PORTAL_HOST_PORT
+  export MEMORY_POSTGRES_HOST_PORT MEMORY_API_HOST_PORT MEMORY_INGESTOR_HOST_PORT MEMORY_JOBS_HOST_PORT
 }
 
 # ---------------------------------------------------------------- compose
@@ -114,33 +117,37 @@ snapshot_repo() { # name dir
   fi
 }
 
-# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC (absolute build contexts).
+# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC (absolute build contexts).
+# resolve_sources [want_portal 0|1] [want_memory 0|1]
 resolve_sources() {
-  local mode="${PROBA_SRC:-main}" want_portal="${1:-0}"
-  local hub web audit portal
+  local mode="${PROBA_SRC:-main}" want_portal="${1:-0}" want_memory="${2:-0}"
+  local hub web audit portal memory
   hub="$(abs_dir "${PROBA_HUB_DIR:-../../proba-hub}")" || true
   web="$(abs_dir "${PROBA_WEB_DIR:-../../proba-web}")" || true
   audit="$(abs_dir "${PROBA_AUDIT_DIR:-../../proba-audit}")" || true
   portal="$(abs_dir "${PROBA_PORTAL_DIR:-../../proba-portal}")" || true
+  memory="$(abs_dir "${PROBA_MEMORY_DIR:-../../proba-memory}")" || true
+  if [ "$want_memory" = "1" ] && [ -z "$memory" ]; then die "proba-memory checkout not found at ${PROBA_MEMORY_DIR:-../../proba-memory} (set PROBA_MEMORY_DIR in local/.env)"; fi
   [ -n "$hub" ] || die "proba-hub checkout not found at ${PROBA_HUB_DIR:-../../proba-hub} (set PROBA_HUB_DIR in local/.env)"
   [ -n "$web" ] || die "proba-web checkout not found at ${PROBA_WEB_DIR:-../../proba-web} (set PROBA_WEB_DIR in local/.env)"
   [ -n "$audit" ] || die "proba-audit checkout not found at ${PROBA_AUDIT_DIR:-../../proba-audit} (set PROBA_AUDIT_DIR in local/.env)"
   case "$mode" in
     worktree)
       info "building from the working trees of the sibling checkouts (PROBA_SRC=worktree)"
-      HUB_SRC="$hub"; WEB_SRC="$web"; AUDIT_SRC="$audit"; PORTAL_SRC="$portal" ;;
+      HUB_SRC="$hub"; WEB_SRC="$web"; AUDIT_SRC="$audit"; PORTAL_SRC="$portal"; MEMORY_SRC="${memory:-$SRC_DIR/proba-memory}" ;;
     main)
       info "snapshotting ${PROBA_REF:-origin/main} of the sibling checkouts into local/.src (PROBA_SRC=main)"
       snapshot_repo proba-hub "$hub" || die "cannot snapshot proba-hub"
       snapshot_repo proba-web "$web" || die "cannot snapshot proba-web"
       snapshot_repo proba-audit "$audit" || die "cannot snapshot proba-audit"
       HUB_SRC="$SRC_DIR/proba-hub"; WEB_SRC="$SRC_DIR/proba-web"; AUDIT_SRC="$SRC_DIR/proba-audit"
-      PORTAL_SRC="$SRC_DIR/proba-portal"
-      if [ "$want_portal" = "1" ] && [ -n "$portal" ]; then snapshot_repo proba-portal "$portal" || true; fi ;;
+      PORTAL_SRC="$SRC_DIR/proba-portal"; MEMORY_SRC="$SRC_DIR/proba-memory"
+      if [ "$want_portal" = "1" ] && [ -n "$portal" ]; then snapshot_repo proba-portal "$portal" || true; fi
+      if [ "$want_memory" = "1" ]; then snapshot_repo proba-memory "$memory" || die "cannot snapshot proba-memory"; fi ;;
     *) die "PROBA_SRC must be main or worktree (got $mode)" ;;
   esac
   [ -f "$AUDIT_SRC/Dockerfile" ] || die "no Dockerfile in $AUDIT_SRC"
-  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC
+  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC
 }
 
 port_listening() {
@@ -239,8 +246,8 @@ skip() { CHECKS_SKIP=$((CHECKS_SKIP + 1)); printf '%sSKIP%s  %s\n' "$C_YELLOW" "
 # Runs inside the metrics-ingester image (it contains the proba-audit core and adapters), against ClickHouse.
 verify_chain() {
   local db="${1:-$CH_DB}" ws="${2:-seedbed}"
-  : "${AUDIT_SRC:=$SRC_DIR/proba-audit}" "${HUB_SRC:=$SRC_DIR/proba-hub}" "${WEB_SRC:=$SRC_DIR/proba-web}" "${PORTAL_SRC:=$SRC_DIR/proba-portal}"
-  export AUDIT_SRC HUB_SRC WEB_SRC PORTAL_SRC
+  : "${AUDIT_SRC:=$SRC_DIR/proba-audit}" "${HUB_SRC:=$SRC_DIR/proba-hub}" "${WEB_SRC:=$SRC_DIR/proba-web}" "${PORTAL_SRC:=$SRC_DIR/proba-portal}" "${MEMORY_SRC:=$SRC_DIR/proba-memory}"
+  export AUDIT_SRC HUB_SRC WEB_SRC PORTAL_SRC MEMORY_SRC
   dc run --rm --no-deps -T -e "CLICKHOUSE_DATABASE=$db" -v "$LOCAL_DIR/tools:/app/tools:ro" \
     --entrypoint node metrics-ingester /app/tools/verify-chain.mjs "$ws" 2>/dev/null | tail -n 1
 }
