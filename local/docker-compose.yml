@@ -55,7 +55,7 @@ x-app-deps: &app-deps
 services:
   # ------------------------------------------------------------------ data stores
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: proba-local-postgres
     environment:
       POSTGRES_USER: proba
