@@ -41,6 +41,9 @@ All ports are bound to `127.0.0.1`. They are deliberately unusual so they do not
 | Postgres (Hub) | localhost:55433 | db `proba_hub`, user `proba` |
 | Redis | localhost:56380 | one Redis for the Hub's pub/sub and the audit stream; AOF on |
 | Portal (profile `portal`) | http://localhost:3410 | see "Portal profile" |
+| Memory API (profile `memory`) | http://localhost:3420 | `/health`, `/ready`, `/v1/...` (read-only). Bearer token: `MEMORY_API_LOCAL_TOKEN` in `local/.env`; see "Memory profile" |
+| memory-ingestor / memory-jobs (profile `memory`) | :3421 / :3422 | `/health` |
+| Postgres with pgvector (profile `memory`) | localhost:55434 | db `proba_memory`, user `proba`, password `MEMORY_POSTGRES_PASSWORD` in `local/.env` |
 
 The compose project is `proba-local` and every container is called `proba-local-*`, so it runs next to other stacks (for example a `proba-audit-*` development
 stack). Data is in the named volumes `proba-local_*_data`.
@@ -49,7 +52,7 @@ stack). Data is in the named volumes `proba-local_*_data`.
 
 | Script | What it does |
 |--------|--------------|
-| `up.sh [--portal] [--no-build] [--no-wait]` | checks the ports, snapshots the sources, builds, **applies the ClickHouse migrations** (including 0008, the table for raw text), starts, waits until everything is healthy |
+| `up.sh [--portal] [--memory] [--no-build] [--no-wait]` | checks the ports, snapshots the sources, builds, **applies the ClickHouse migrations** (including 0008, the table for raw text), starts, waits until everything is healthy |
 | `status.sh [--quiet]` | one line per service (container health plus its HTTP `/health`); non-zero exit when anything is down |
 | `seed.sh` | ~40 commands through `POST /v1/commands` (exactly what the web app sends): see below |
 | `verify.sh [--quick] [--trace ID]` | the automated checks; `--quick` skips the slow ones; `--trace` prints one trace's spans |
@@ -132,6 +135,41 @@ After `./seed.sh` there is audit history and analytics data to look at. `./statu
 By default the portal is built from a snapshot of `origin/main` of your `proba-portal` checkout. To try an unmerged branch use `PROBA_SRC=worktree ./up.sh --portal`, or `PROBA_REF=origin/<branch> ./up.sh --portal` (repositories without that branch fall back to `main`).
 The portal's **Raw text** panel (administrators only) is described in "Raw text of events" below, with the step-by-step sign-in.
 
+## Memory profile
+
+`./up.sh --memory` also builds and starts the **memory service** (`proba-memory`) next to the platform. It can be combined with the portal: `./up.sh --portal --memory`.
+
+| Container | Role | Host port |
+|-----------|------|-----------|
+| `memory-postgres` | the memory service's own database (`pgvector/pgvector:pg16`; the Hub's Postgres has no pgvector) | 55434 |
+| `memory-migrate` | one-shot: applies the SQL migrations, idempotent | none |
+| `memory-ingestor` | reads the audit stream `proba.audit.events` from the stack's Redis and stores what it learns as redacted memories | 3421 |
+| `memory-api` | read-only HTTP API: `/v1/session`, `/v1/memories`, `/v1/memories/search`, `/v1/profiles` | 3420 |
+| `memory-jobs` | background lifecycle jobs (`MEMORY_JOBS_ENABLED`, default `decay`) | 3422 |
+
+* **Source**: built from a snapshot of `origin/main` of your `proba-memory` checkout (`PROBA_MEMORY_DIR`, default `../../proba-memory`), like the other repositories.
+* **Data flow**: the Hub writes audit events, the Redis stream carries them, `memory-ingestor` consumes them. Run `./seed.sh` and memories appear within seconds. With `AUDIT_CONTENT_ENABLED=true`
+  (the local default) the events carry the masked raw text, which is what the memory service learns from; without it there is little to learn.
+* **No external provider is needed locally**: embeddings and extraction are deterministic (`MEMORY_EMBEDDER=hash`, `MEMORY_LLM_PROVIDER=scripted`), good enough to exercise the flows, not for
+  judging quality. For real ones set `MEMORY_EMBEDDER=openai-compatible` (with `MEMORY_EMBEDDER_BASE_URL`, `MEMORY_EMBEDDER_MODEL`, `MEMORY_EMBEDDER_API_KEY`) and `MEMORY_LLM_PROVIDER=deepseek`
+  (with `MEMORY_LLM_API_KEY`) in `local/.env`. Keep keys there; never commit them.
+* **Sign-in**: like the audit API, the default is the `static` token verifier (local automated use only, refused in production). `MEMORY_API_LOCAL_TOKEN` is an administrator
+  (`local-admin@proba.local`), `MEMORY_API_LOCAL_VIEWER_TOKEN` a viewer (`local-viewer@proba.local`); both are generated into `local/.env` by `up.sh`. For Firebase ID tokens
+  (for example from the portal) set `MEMORY_API_TOKEN_VERIFIER=firebase`, `FIREBASE_PROJECT_ID` and your email in `MEMORY_API_ADMIN_EMAILS` / `MEMORY_API_ALLOWED_EMAILS`.
+  The portal's origin is already allowed through `MEMORY_API_CORS_ORIGINS`. The workspace is fixed by the deployment (`seedbed`), never taken from a request.
+
+```bash
+set -a; . .env; set +a                                   # from local/
+curl -s http://localhost:3420/ready
+curl -s -H "authorization: Bearer $MEMORY_API_LOCAL_TOKEN" http://localhost:3420/v1/session | jq
+curl -s -H "authorization: Bearer $MEMORY_API_LOCAL_TOKEN" http://localhost:3420/v1/memories | jq '.items | length'
+curl -s -H "authorization: Bearer $MEMORY_API_LOCAL_TOKEN" -H 'content-type: application/json' \
+     -d '{"query":"what does the user want to do","limit":3}' http://localhost:3420/v1/memories/search | jq
+```
+
+`./status.sh` reports the memory containers when they exist. `./down.sh` stops them and `./reset.sh --yes` also deletes the `memory_postgres_data` volume.
+`PORTAL_MEMORY_URL` (see "Portal profile") can point at `http://localhost:3420` once the portal's memory screens read from this API.
+
 ## Raw text of events
 
 Since protocol 0.3.3 an audit event can carry the raw text of what was said: the person's message, the Hub's reply, an explanation, a clarifying question (`content`). It is
@@ -208,4 +246,6 @@ audit API verifies that account's ID token itself and decides the role from `loc
 * **`verify.sh` step 10 fails right after the first start**: the ingester needs a minute to fetch the first observations and for the rollup to run. Wait and re-run.
 * **Docker memory**: if ClickHouse is killed (exit 137), give Docker more memory.
 * **The web app's container shows unhealthy upstream**: `proba-web`'s own healthcheck uses `localhost`, which resolves to IPv6 in the Alpine image while nginx listens on IPv4. `local/docker-compose.yml` overrides it with `127.0.0.1`.
+* **`./up.sh --memory` says it cannot snapshot or build proba-memory**: the checkout must exist at `PROBA_MEMORY_DIR` and have a `Dockerfile` on the ref (`PROBA_REF`). Its image build installs the protocol package from a git tag, so it needs network access.
+* **No memories after `./seed.sh`**: check `docker compose -p proba-local --env-file .env -f docker-compose.yml logs memory-ingestor`, that `AUDIT_CONTENT_ENABLED=true`, and that `memory-ingestor` and `hub` share the same Redis (they do by default). Memories are written only for events that carry something to learn from.
 * **Other `proba-audit-*` containers** (a proba-audit development stack) are never touched by these scripts; they only see `proba-local-*`.

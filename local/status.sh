@@ -49,4 +49,12 @@ check_service rollup "http://127.0.0.1:${ROLLUP_HOST_PORT}/health"
 check_service audit-api "http://127.0.0.1:${AUDIT_API_HOST_PORT}/health"
 # The portal profile: reported only when its container exists.
 if docker inspect "${PROJECT}-portal" >/dev/null 2>&1; then check_service portal "http://127.0.0.1:${PORTAL_HOST_PORT}/health"; fi
+# The memory profile: reported only when its containers exist.
+if docker inspect "${PROJECT}-memory-api" >/dev/null 2>&1; then
+  check_service memory-postgres
+  check_job memory-migrate
+  check_service memory-api "http://127.0.0.1:${MEMORY_API_HOST_PORT}/health"
+  check_service memory-ingestor "http://127.0.0.1:${MEMORY_INGESTOR_HOST_PORT}/health"
+  check_service memory-jobs "http://127.0.0.1:${MEMORY_JOBS_HOST_PORT}/health"
+fi
 exit "$bad"

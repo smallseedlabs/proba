@@ -14,17 +14,17 @@ for a in "$@"; do
   esac
 done
 if [ "$YES" != 1 ]; then
-  printf 'This deletes ALL local platform data (project %s: Postgres, Redis, ClickHouse). Type yes: ' "$PROJECT"
+  printf 'This deletes ALL local platform data (project %s: Postgres, Redis, ClickHouse, memory Postgres). Type yes: ' "$PROJECT"
   read -r answer; [ "$answer" = yes ] || die "aborted"
 fi
 if [ -f "$LOCAL_DIR/.env" ]; then
   load_env
-  export COMPOSE_PROFILES=portal
-  export HUB_SRC="$SRC_DIR/proba-hub" WEB_SRC="$SRC_DIR/proba-web" AUDIT_SRC="$SRC_DIR/proba-audit" PORTAL_SRC="$SRC_DIR/proba-portal"
+  export COMPOSE_PROFILES=portal,memory
+  export HUB_SRC="$SRC_DIR/proba-hub" WEB_SRC="$SRC_DIR/proba-web" AUDIT_SRC="$SRC_DIR/proba-audit" PORTAL_SRC="$SRC_DIR/proba-portal" MEMORY_SRC="$SRC_DIR/proba-memory"
   dc down --volumes --remove-orphans
 else
   warn "no local/.env: removing the project's volumes by name"
-  for v in postgres_data redis_data clickhouse_data; do docker volume rm "${PROJECT}_$v" >/dev/null 2>&1 || true; done
+  for v in postgres_data redis_data clickhouse_data memory_postgres_data; do docker volume rm "${PROJECT}_$v" >/dev/null 2>&1 || true; done
 fi
 rm -rf "$STATE_DIR" "$SRC_DIR"
 if [ "$IMAGES" = 1 ]; then
