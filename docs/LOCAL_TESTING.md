@@ -37,9 +37,9 @@ All ports are bound to `127.0.0.1`. They are deliberately unusual so they do not
 | Hub API | http://localhost:3300 | `/health`; `POST /v1/commands`, `GET /v1/events`; `POST /dev/login` (development only) |
 | Audit API | http://localhost:3400 | `/health`, `/ready`, `/v1/...` (read-only). Bearer token: `AUDIT_API_LOCAL_TOKEN` in `local/.env` |
 | audit-consumer / metrics-ingester / rollup | :3401 / :3402 / :3403 | `/health` |
-| ClickHouse (HTTP) | http://localhost:58125 | user `proba`, password in `local/.env`; `./sql.sh "..."` is the easy way |
+| ClickHouse (HTTP) | http://localhost:58125 | admin user `proba`, password in `local/.env` (the services use their own least-privilege users, see "Security of the local stack"); `./sql.sh "..."` is the easy way |
 | Postgres (Hub) | localhost:55433 | db `proba_hub`, user `proba` |
-| Redis | localhost:56380 | one Redis for the Hub's pub/sub and the audit stream; AOF on |
+| Redis | localhost:56380 | one Redis for the Hub's pub/sub and the audit stream; AOF on; ACL user `proba` with `REDIS_PASSWORD` from `local/.env` (no anonymous access) |
 | Portal (profile `portal`) | http://localhost:3410 | see "Portal profile" |
 | Memory API (profile `memory`) | http://localhost:3420 | `/health`, `/ready`, `/v1/...` (read-only). Bearer token: `MEMORY_API_LOCAL_TOKEN` in `local/.env`; see "Memory profile" |
 | memory-ingestor / memory-jobs (profile `memory`) | :3421 / :3422 | `/health` |
@@ -47,6 +47,24 @@ All ports are bound to `127.0.0.1`. They are deliberately unusual so they do not
 
 The compose project is `proba-local` and every container is called `proba-local-*`, so it runs next to other stacks (for example a `proba-audit-*` development
 stack). Data is in the named volumes `proba-local_*_data`.
+
+## Security of the local stack
+
+Local does not mean open. CI (`scripts/check-compose-security.mjs`) enforces all of this on `local/docker-compose.yml`:
+
+* **Loopback only**: every published port is `127.0.0.1:...`. Nothing is reachable from another machine. To share it, use a reverse proxy with TLS; do not widen a bind.
+* **No default passwords**: every secret in the compose file is `${NAME:?run ./up.sh ...}`. `./up.sh` writes `local/.env` (mode 600, gitignored) with random hex values on first run
+  and fills in any secret added later; it never overwrites a value. A `local/.env` from before this change gets the new secrets on the next `./up.sh`.
+* **Redis has a password**: `REDIS_USER` (default `proba`) and `REDIS_PASSWORD`. The `default` user is off, and the ACL user cannot run `@dangerous` commands (`FLUSHALL`, `KEYS`, `CONFIG`, ...).
+  Services get `REDIS_URL=redis://proba:<password>@redis:6379` (`rediss://` for a TLS Redis elsewhere). From the host use `./sql.sh`-style helpers, or
+  `docker compose -p proba-local --env-file .env -f docker-compose.yml exec -e REDISCLI_AUTH="$REDIS_PASSWORD" redis redis-cli --user proba ping`.
+* **ClickHouse roles** (needs proba-audit with the P0 safety change, [proba-audit#25](https://github.com/smallseedlabs/proba-audit/pull/25); `PROBA_SRC=worktree` with that branch checked out until it is merged):
+  `CLICKHOUSE_CONSUMER_PASSWORD`, `CLICKHOUSE_API_PASSWORD` and `CLICKHOUSE_MIGRATOR_PASSWORD` are generated. Only `audit-migrate` knows the admin password; it creates the users.
+  `audit-consumer`, `metrics-ingester` and `rollup` connect as `proba_consumer` (INSERT + SELECT, no UPDATE/DELETE/DDL), `audit-api` as `proba_api` (SELECT only). `verify.sh` reads the chain as `proba_api`;
+  `tamper-demo.sh` uses the admin for its throwaway database only.
+* **Durable anchors and leases**: `ANCHOR_STORE=postgres` (signed chain heads in the Hub's Postgres, `ANCHOR_HMAC_KEY` generated) and `LEASE_STORE=redis`; the portal's Memory screens point at `PORTAL_MEMORY_URL`.
+* **Stream retention**: `AUDIT_STREAM_MAX_AGE_HOURS` (default `72`, in `local/.env`): acknowledged messages of `proba.audit.events` older than this are trimmed by the audit-consumer; unacknowledged ones are never removed.
+  This is read by proba-audit with the P0 safety change; earlier versions ignore it.
 
 ## The scripts
 
