@@ -44,9 +44,12 @@ x-audit-env: &audit-env
   EVENT_BUS: redis-streams
   AUDIT_STORE: clickhouse
   # Raw text of events (protocol 0.3.3): the same value for the consumer (stores it), the API (serves it to
-  # administrators) and the Hub (writes it). On locally; the stores below are created by migration 0008.
+  # administrators) and the Hub (writes it). Explicitly on in this stack so memory can learn conversation text;
+  # production deployments should set AUDIT_CONTENT_ENABLED explicitly (Hub default is off). Migration 0008.
   AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-true}
   AUDIT_CONTENT_STORE: ${AUDIT_CONTENT_STORE:-clickhouse}
+  # Hub: mask emails, phones and IBANs in content (secrets/cards always masked). Default on.
+  AUDIT_CONTENT_MASK_PII: ${AUDIT_CONTENT_MASK_PII:-true}
   METRICS_STORE: clickhouse
   CHECKPOINT_STORE: clickhouse
   QUARANTINE_STORE: clickhouse
@@ -201,6 +204,7 @@ services:
       AUDIT_WORKSPACE_ID: seedbed
       # Raw text of messages, replies and explanations on audit events (secrets masked): see local/.env.example.
       AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-true}
+      AUDIT_CONTENT_MASK_PII: ${AUDIT_CONTENT_MASK_PII:-true}
     ports:
       - "127.0.0.1:${HUB_HOST_PORT:-3300}:3000"
     restart: unless-stopped

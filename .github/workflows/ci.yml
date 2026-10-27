@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -24,14 +25,9 @@ jobs:
         with:
           node-version: '20'
 
-      # The checker needs only js-yaml; this repository has no package.json.
       - name: Install the checker's dependency
         run: npm install --no-save --no-package-lock js-yaml@4
 
-      # Resolves local/docker-compose.yml for every profile and fails if a published port is not bound to 127.0.0.1,
-      # a password has a default (or a literal), or a required password variable is not really required.
-      # Allowed exceptions: the Firebase web API key (public identifier), optional provider API keys of the memory profile
-      # (an EMPTY default only), and the lists of static local tokens (each token inside is a required variable).
       - name: Check local/docker-compose.yml
         run: |
           node scripts/check-compose-security.mjs \
@@ -40,7 +36,6 @@ jobs:
             --composite AUDIT_API_STATIC_TOKENS,MEMORY_API_STATIC_TOKENS \
             local/docker-compose.yml
 
-      # up.sh generates every required secret: a fresh local/.env must satisfy the compose file on its own.
       - name: A generated local/.env satisfies the compose file
         run: |
           bash -c '. local/lib.sh && ensure_env' >/dev/null
@@ -50,8 +45,76 @@ jobs:
             docker compose -p proba-ci --env-file local/.env -f local/docker-compose.yml --profile portal --profile memory config -q
 
   scripts:
-    name: Shell scripts parse
+    name: Shellcheck and parse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: for f in local/*.sh; do bash -n "$f"; done
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: bash -n
+        run: for f in local/*.sh; do bash -n "$f"; done
+      - name: shellcheck
+        # Fail on warning+; SC2015 etc. are info-level on intentional A && B || C in verify.sh
+        run: shellcheck -S warning -x local/*.sh
+
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # gitleaks-action needs an org license; MIT CLI does not.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: '8.24.2'
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan for secrets
+        run: gitleaks detect --source . --config .gitleaks.toml --verbose --redact --exit-code 1
+
+  docs-links:
+    name: Docs link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check relative markdown links under docs/ and README
+        run: |
+          set -euo pipefail
+          fail=0
+          check_file() {
+            local file="$1"
+            # Relative links: [text](path) or [text](path#anchor) — skip http(s), mailto, anchors-only.
+            while IFS= read -r link; do
+              local path="${link%%#*}"
+              [ -n "$path" ] || continue
+              case "$path" in
+                http://*|https://*|mailto:*|\#*) continue ;;
+              esac
+              local base dir target
+              dir=$(dirname "$file")
+              target="$dir/$path"
+              if [ ! -e "$target" ]; then
+                echo "broken link in $file: $link -> $target"
+                fail=1
+              fi
+            done < <(grep -oE '\[[^]]*\]\([^)]+\)' "$file" | sed -E 's/^\[[^]]*\]\(([^)]+)\)$/\1/' || true)
+          }
+          for f in README.md docs/*.md; do
+            [ -f "$f" ] || continue
+            check_file "$f"
+          done
+          exit "$fail"
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    # This repo is mostly shell/compose; still run CodeQL for any JS under scripts/.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+      - uses: github/codeql-action/analyze@v3

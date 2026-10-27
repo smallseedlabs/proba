@@ -6,6 +6,7 @@ LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export LOCAL_DIR
 PROJECT=proba-local
 STATE_DIR="$LOCAL_DIR/.state"
+export STATE_DIR
 SRC_DIR="$LOCAL_DIR/.src"
 # Docker Desktop on macOS keeps its CLI here; harmless elsewhere.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -60,7 +61,7 @@ ensure_env() {
   done
   # Settings added after a local/.env was first created: append the local default, never touch a value that exists.
   local def
-  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse \
+  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse AUDIT_CONTENT_MASK_PII=true \
              "PORTAL_MEMORY_URL=http://127.0.0.1:3420" REDIS_USER=proba \
              CLICKHOUSE_CONSUMER_USER=proba_consumer CLICKHOUSE_API_USER=proba_api CLICKHOUSE_MIGRATOR_USER=proba_migrator \
              AUDIT_STREAM_MAX_AGE_HOURS=72; do
@@ -228,6 +229,7 @@ hub_post() {
   rm -f "$hdr"
   LAST_STATUS="$(printf '%s' "$resp" | jq -r '.status // "error"')"
   LAST_ID="$id"
+  export LAST_TRACE_HEADER LAST_STATUS LAST_ID
 }
 
 # hub_events TOKEN [AFTER] -> JSON array of all the user's events after a seq (follows the 50-per-page polling)
@@ -266,8 +268,8 @@ verify_chain() {
   export AUDIT_SRC HUB_SRC WEB_SRC PORTAL_SRC MEMORY_SRC
   # The real database is read as the read-only api user; any other database (tamper-demo's throwaway copy) as the admin, which is
   # the only user with grants on it. verify-chain.mjs reads VERIFY_CHAIN_AS.
-  local as=api admin_env=()
-  if [ "$db" != "$CH_DB" ]; then as=admin; admin_env=(-e "CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD"); fi
+  local as="api" admin_env=()
+  if [ "$db" != "$CH_DB" ]; then as="admin"; admin_env=(-e "CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD"); fi
   dc run --rm --no-deps -T -e "CLICKHOUSE_DATABASE=$db" -e "VERIFY_CHAIN_AS=$as" ${admin_env[@]+"${admin_env[@]}"} \
     -e "CLICKHOUSE_API_PASSWORD=$CLICKHOUSE_API_PASSWORD" -v "$LOCAL_DIR/tools:/app/tools:ro" \
     --entrypoint node metrics-ingester /app/tools/verify-chain.mjs "$ws" 2>/dev/null | tail -n 1
