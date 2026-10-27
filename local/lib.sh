@@ -28,6 +28,12 @@ need() {
 }
 
 # ---------------------------------------------------------------- env file
+# Every secret of local/.env that ./up.sh generates (random hex, never overwritten). docker-compose.yml requires each of them
+# (`${NAME:?...}`): there is no default password anywhere.
+GENERATED_SECRETS="JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN \
+  MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN ANCHOR_HMAC_KEY \
+  REDIS_PASSWORD CLICKHOUSE_CONSUMER_PASSWORD CLICKHOUSE_API_PASSWORD CLICKHOUSE_MIGRATOR_PASSWORD"
+
 # Create local/.env from the example on first run and fill the secrets with random,
 # local-only values. Existing values are never overwritten. Nothing is printed.
 ensure_env() {
@@ -38,8 +44,8 @@ ensure_env() {
     info "created local/.env from local/.env.example (gitignored, mode 600)"
   fi
   local key
-  for key in JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN \
-             MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN; do
+  # All values are hex: safe inside the URLs that carry the Redis and Postgres passwords.
+  for key in $GENERATED_SECRETS; do
     if ! grep -Eq "^${key}=.+" "$f"; then
       local val; val="$(openssl rand -hex 32)"
       # Rewrite the line without printing it; avoid sed -i (differs between macOS and Linux).
@@ -54,10 +60,13 @@ ensure_env() {
   done
   # Settings added after a local/.env was first created: append the local default, never touch a value that exists.
   local def
-  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse; do
+  for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse \
+             "PORTAL_MEMORY_URL=http://127.0.0.1:3420" REDIS_USER=proba \
+             CLICKHOUSE_CONSUMER_USER=proba_consumer CLICKHOUSE_API_USER=proba_api CLICKHOUSE_MIGRATOR_USER=proba_migrator \
+             AUDIT_STREAM_MAX_AGE_HOURS=72; do
     if ! grep -Eq "^${def%%=*}=" "$f"; then
       printf '%s\n' "$def" >> "$f"
-      info "added ${def%%=*}=${def#*=} to local/.env (raw text of events, see docs/LOCAL_TESTING.md)"
+      info "added ${def%%=*}=${def#*=} to local/.env (see docs/LOCAL_TESTING.md)"
     fi
   done
 }
@@ -74,6 +83,12 @@ load_env() {
   . "$LOCAL_DIR/.env"
   [ -z "$keep" ] || eval "$keep"
   set +a
+  # down.sh, status.sh and reset.sh run on a local/.env from before a secret existed (up.sh generates it): compose still has to
+  # interpolate the whole file, so fill in a placeholder. up.sh calls ensure_env first, so it never sees one.
+  local gk
+  for gk in $GENERATED_SECRETS; do
+    [ -n "${!gk:-}" ] || export "$gk=not-generated-run-up.sh"
+  done
   : "${WEB_HOST_PORT:=5180}" "${HUB_HOST_PORT:=3300}" "${POSTGRES_HOST_PORT:=55433}" "${REDIS_HOST_PORT:=56380}"
   : "${CLICKHOUSE_HTTP_HOST_PORT:=58125}" "${AUDIT_CONSUMER_HOST_PORT:=3401}" "${METRICS_INGESTER_HOST_PORT:=3402}"
   : "${ROLLUP_HOST_PORT:=3403}" "${AUDIT_API_HOST_PORT:=3400}" "${PORTAL_HOST_PORT:=3410}"
@@ -180,7 +195,8 @@ ch() { # ch "SQL"  -> raw result (TSV unless the SQL has FORMAT)
 }
 ch_pretty() { ch "$1 FORMAT PrettyCompactMonoBlock"; }
 pg() { dc exec -T postgres psql -U proba -d proba_hub -tA -c "$1"; }
-rds() { dc exec -T redis redis-cli "$@"; }
+# Redis has an ACL user and password: authenticate through the environment of the redis container (REDISCLI_AUTH), not the arguments.
+rds() { dc exec -T -e "REDISCLI_AUTH=$REDIS_PASSWORD" redis redis-cli --user "${REDIS_USER:-proba}" "$@"; }
 
 hub_url() { printf 'http://127.0.0.1:%s' "$HUB_HOST_PORT"; }
 
@@ -248,6 +264,11 @@ verify_chain() {
   local db="${1:-$CH_DB}" ws="${2:-seedbed}"
   : "${AUDIT_SRC:=$SRC_DIR/proba-audit}" "${HUB_SRC:=$SRC_DIR/proba-hub}" "${WEB_SRC:=$SRC_DIR/proba-web}" "${PORTAL_SRC:=$SRC_DIR/proba-portal}" "${MEMORY_SRC:=$SRC_DIR/proba-memory}"
   export AUDIT_SRC HUB_SRC WEB_SRC PORTAL_SRC MEMORY_SRC
-  dc run --rm --no-deps -T -e "CLICKHOUSE_DATABASE=$db" -v "$LOCAL_DIR/tools:/app/tools:ro" \
+  # The real database is read as the read-only api user; any other database (tamper-demo's throwaway copy) as the admin, which is
+  # the only user with grants on it. verify-chain.mjs reads VERIFY_CHAIN_AS.
+  local as=api admin_env=()
+  if [ "$db" != "$CH_DB" ]; then as=admin; admin_env=(-e "CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD"); fi
+  dc run --rm --no-deps -T -e "CLICKHOUSE_DATABASE=$db" -e "VERIFY_CHAIN_AS=$as" ${admin_env[@]+"${admin_env[@]}"} \
+    -e "CLICKHOUSE_API_PASSWORD=$CLICKHOUSE_API_PASSWORD" -v "$LOCAL_DIR/tools:/app/tools:ro" \
     --entrypoint node metrics-ingester /app/tools/verify-chain.mjs "$ws" 2>/dev/null | tail -n 1
 }

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'fix/**', 'feat/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-security:
+    name: Compose security (loopback ports, no default passwords)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The checker needs only js-yaml; this repository has no package.json.
+      - name: Install the checker's dependency
+        run: npm install --no-save --no-package-lock js-yaml@4
+
+      # Resolves local/docker-compose.yml for every profile and fails if a published port is not bound to 127.0.0.1,
+      # a password has a default (or a literal), or a required password variable is not really required.
+      # Allowed exceptions: the Firebase web API key (public identifier), optional provider API keys of the memory profile
+      # (an EMPTY default only), and the lists of static local tokens (each token inside is a required variable).
+      - name: Check local/docker-compose.yml
+        run: |
+          node scripts/check-compose-security.mjs \
+            --public FIREBASE_API_KEY \
+            --optional MEMORY_EMBEDDER_API_KEY,MEMORY_LLM_API_KEY \
+            --composite AUDIT_API_STATIC_TOKENS,MEMORY_API_STATIC_TOKENS \
+            local/docker-compose.yml
+
+      # up.sh generates every required secret: a fresh local/.env must satisfy the compose file on its own.
+      - name: A generated local/.env satisfies the compose file
+        run: |
+          bash -c '. local/lib.sh && ensure_env' >/dev/null
+          test "$(grep -c '^REDIS_PASSWORD=.\{20,\}' local/.env)" = 1
+          test "$(grep -c '^CLICKHOUSE_CONSUMER_PASSWORD=.\{20,\}' local/.env)" = 1
+          HUB_SRC=. WEB_SRC=. AUDIT_SRC=. PORTAL_SRC=. MEMORY_SRC=. \
+            docker compose -p proba-ci --env-file local/.env -f local/docker-compose.yml --profile portal --profile memory config -q
+
+  scripts:
+    name: Shell scripts parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: for f in local/*.sh; do bash -n "$f"; done

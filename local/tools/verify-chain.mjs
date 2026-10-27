@@ -8,7 +8,10 @@ import { createRuntime } from '@smallseedlabs/proba-audit-adapters';
 const workspaceId = process.argv[2] || process.env.INGEST_WORKSPACE_ID || 'seedbed';
 const config = loadConfigFromEnvironment({ serviceName: 'verify-chain', defaultPort: 0 });
 const logger = createLogger({ service: 'verify-chain', level: 'error', env: config.env });
-const runtime = await createRuntime(config, { logger });
+// Reads only, so by default it connects as the read-only `api` ClickHouse user (CLICKHOUSE_API_PASSWORD). tamper-demo.sh verifies a
+// throwaway database that the role users have no grants on: it sets VERIFY_CHAIN_AS=admin to connect as CLICKHOUSE_USER instead.
+const asAdmin = process.env.VERIFY_CHAIN_AS === 'admin';
+const runtime = await createRuntime(config, asAdmin ? { logger } : { logger, clickhouseRole: 'api' });
 let code = 0;
 try {
   const result = await verifyChain(runtime.auditStore, workspaceId, {}, { pageSize: 1000, maxProblems: 10 });

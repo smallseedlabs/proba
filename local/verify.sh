@@ -235,6 +235,7 @@ step "11. swap by configuration (throwaway ingester containers, nothing shared)"
 if [ "$QUICK" = 1 ]; then skip "swap demos" "--quick"
 else
   out="$(INGESTER_RUN -e EVENT_BUS=memory -e AUDIT_STORE=memory -e METRICS_STORE=memory -e CHECKPOINT_STORE=memory -e QUARANTINE_STORE=memory -e PLATFORM_CONNECTORS=meta:stub -e PORT=3199 \
+    -e ALLOW_IN_MEMORY_ADAPTERS=true -e LEASE_STORE=memory -e AUDIT_CONTENT_STORE=memory \
     --entrypoint sh metrics-ingester -c 'timeout 15 node apps/metrics-ingester/dist/index.js 2>&1' 2>&1 || true)"
   if grep -q '"eventBus":"memory"' <<<"$out" && grep -q '"auditStore":"memory"' <<<"$out" && grep -q '"metricsStore":"memory"' <<<"$out" && grep -q 'lifecycle":"started"' <<<"$out"; then
     pass "EVENT_BUS=memory AUDIT_STORE=memory METRICS_STORE=memory: the ingester starts on the in-memory adapters, no code change"

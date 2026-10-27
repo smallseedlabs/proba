@@ -8,3 +8,5 @@ One command starts the Hub, web app, audit pipeline, audit API and the metrics p
 ```bash
 cd local && ./up.sh && ./seed.sh && ./verify.sh
 ```
+
+The local stack is locked down: ports on `127.0.0.1` only, no default passwords (`./up.sh` generates random ones into `local/.env`), Redis with an ACL user and password, and least-privilege ClickHouse users. See [Security of the local stack](docs/LOCAL_TESTING.md#security-of-the-local-stack). Branch protection for `main`: [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md).
