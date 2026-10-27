@@ -54,7 +54,8 @@ jobs:
       - name: bash -n
         run: for f in local/*.sh; do bash -n "$f"; done
       - name: shellcheck
-        run: shellcheck -x local/*.sh
+        # Fail on warning+; SC2015 etc. are info-level on intentional A && B || C in verify.sh
+        run: shellcheck -S warning -x local/*.sh
 
   gitleaks:
     name: Gitleaks
@@ -63,9 +64,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # gitleaks-action needs an org license; MIT CLI does not.
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: '8.24.2'
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan for secrets
+        run: gitleaks detect --source . --config .gitleaks.toml --verbose --redact --exit-code 1
 
   docs-links:
     name: Docs link check
