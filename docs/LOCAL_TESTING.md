@@ -166,8 +166,8 @@ The portal's **Raw text** panel (administrators only) is described in "Raw text 
 | `memory-jobs` | background lifecycle jobs (`MEMORY_JOBS_ENABLED`, default `decay`) | 3422 |
 
 * **Source**: built from a snapshot of `origin/main` of your `proba-memory` checkout (`PROBA_MEMORY_DIR`, default `../../proba-memory`), like the other repositories.
-* **Data flow**: the Hub writes audit events, the Redis stream carries them, `memory-ingestor` consumes them. Run `./seed.sh` and memories appear within seconds. With `AUDIT_CONTENT_ENABLED=true`
-  (the local default) the events carry the masked raw text, which is what the memory service learns from; without it there is little to learn.
+* **Data flow**: the Hub writes audit events, the Redis stream carries them, `memory-ingestor` consumes them. Run `./seed.sh` and memories appear within seconds. **Memory learns conversation text only when `AUDIT_CONTENT_ENABLED=true`**
+  (the local default): events then carry the masked raw text. Without it there is little to learn. Production should set the flag explicitly (Hub default is off).
 * **No external provider is needed locally**: embeddings and extraction are deterministic (`MEMORY_EMBEDDER=hash`, `MEMORY_LLM_PROVIDER=scripted`), good enough to exercise the flows, not for
   judging quality. For real ones set `MEMORY_EMBEDDER=openai-compatible` (with `MEMORY_EMBEDDER_BASE_URL`, `MEMORY_EMBEDDER_MODEL`, `MEMORY_EMBEDDER_API_KEY`) and `MEMORY_LLM_PROVIDER=deepseek`
   (with `MEMORY_LLM_API_KEY`) in `local/.env`. Keep keys there; never commit them.
@@ -191,13 +191,13 @@ curl -s -H "authorization: Bearer $MEMORY_API_LOCAL_TOKEN" -H 'content-type: app
 ## Raw text of events
 
 Since protocol 0.3.3 an audit event can carry the raw text of what was said: the person's message, the Hub's reply, an explanation, a clarifying question (`content`). It is
-**admin-only**, **secrets are masked** by the Hub before it leaves (passwords, tokens, API keys, card numbers become `[REDACTED...]` and are counted; names, emails and plans stay), and it
-is **kept apart from the hash chain**: `audit_events` holds only `content_digest` (SHA-256 of the text), the text is in its own ClickHouse table `audit_event_content` (migration 0008).
+**admin-only**, **secrets are masked** by the Hub before it leaves (passwords, tokens, API keys, card numbers become `[REDACTED...]` and are counted), and with `AUDIT_CONTENT_MASK_PII=true` (local default)
+emails, phones and IBANs are masked too; names and plans stay. It is **kept apart from the hash chain**: `audit_events` holds only `content_digest` (SHA-256 of the text), the text is in its own ClickHouse table `audit_event_content` (migration 0008).
 Changing the text no longer matches the digest; deleting it (retention) leaves the chain valid.
 
-Locally it is **on by default**: `local/.env` gets `AUDIT_CONTENT_ENABLED=true` and `AUDIT_CONTENT_STORE=clickhouse` (`up.sh` adds them to an existing `local/.env` too and never changes a value that is
-there). One flag drives the Hub (writes the text), the audit-consumer (stores it) and the audit API (serves it to administrators). Set it to `false` to see production's default: the text is never
-stored, events say nothing about it and the portal shows no panel. `up.sh` runs the ClickHouse migrations itself before the consumer starts, so a `local/.env` and volumes from before 0008 are upgraded by `./up.sh`.
+Locally it is **on by default**: `local/.env` gets `AUDIT_CONTENT_ENABLED=true`, `AUDIT_CONTENT_STORE=clickhouse` and `AUDIT_CONTENT_MASK_PII=true` (`up.sh` adds them to an existing `local/.env` too and never changes a value that is
+there). One content flag drives the Hub (writes the text), the audit-consumer (stores it) and the audit API (serves it to administrators). **Memory learns that conversation text only when the flag is on.** Set it to `false` to see production's Hub default: the text is never
+stored, events say nothing about it and the portal shows no panel. Production compose/env should set `AUDIT_CONTENT_ENABLED` explicitly. `up.sh` runs the ClickHouse migrations itself before the consumer starts, so a `local/.env` and volumes from before 0008 are upgraded by `./up.sh`.
 
 ### How to see and test it
 
