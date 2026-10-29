@@ -67,9 +67,15 @@ ensure_env() {
              AUDIT_STREAM_MAX_AGE_HOURS=72 \
              HUB_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem \
              CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem; do
-    if ! grep -Eq "^${def%%=*}=" "$f"; then
-      printf '%s\n' "$def" >> "$f"
-      info "added ${def%%=*}=${def#*=} to local/.env (see docs/LOCAL_TESTING.md)"
+    local dkey="${def%%=*}" dval="${def#*=}"
+    # Fill missing or empty lines (local/.env.example ships empty key-file paths for the bridge).
+    if ! grep -Eq "^${dkey}=.+" "$f"; then
+      if grep -Eq "^${dkey}=" "$f"; then
+        awk -v k="$dkey" -v v="$dval" 'BEGIN{FS=OFS="="} $1==k {print k "=" v; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      else
+        printf '%s=%s\n' "$dkey" "$dval" >> "$f"
+      fi
+      info "added ${dkey}=${dval} to local/.env (see docs/LOCAL_TESTING.md)"
     fi
   done
 }
