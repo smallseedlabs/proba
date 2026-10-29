@@ -10,4 +10,7 @@ paths = [
   '''.*\.testing\.ts$''',
   '''.*\.integration\.test\.ts$''',
   '''(^|/)README\.md$''',
+  # Canary strings and static tokens used only to prove redaction / isolation in the local stack.
+  '''(^|/)local/verify-context\.sh$''',
+  '''(^|/)local/tools/context-verify-checks\.mjs$''',
 ]

@@ -2,19 +2,21 @@
 # Bring up the whole local platform with one command:  ./up.sh
 #   --portal      also start Proba Insights (proba-portal); needs the Firebase settings, see docs/LOCAL_TESTING.md
 #   --memory      also start the memory service (proba-memory: memory-api, ingestor, jobs, own Postgres); see docs/LOCAL_TESTING.md
+#   --context     also start the context bridge (proba-context: context-api, migrations, own Postgres); see docs/LOCAL_TESTING.md
 #   --no-build    do not rebuild images (reuse proba-local/*:dev, or images you pulled via *_IMAGE)
 #   --no-wait     do not wait for the services to become healthy
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-PORTAL=0; MEMORY=0; BUILD=1; WAIT=1
+PORTAL=0; MEMORY=0; CONTEXT=0; BUILD=1; WAIT=1
 for a in "$@"; do
   case "$a" in
     --portal) PORTAL=1 ;;
     --memory) MEMORY=1 ;;
+    --context) CONTEXT=1 ;;
     --no-build) BUILD=0 ;;
     --no-wait) WAIT=0 ;;
-    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     *) die "unknown option: $a" ;;
   esac
 done
@@ -24,14 +26,21 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running"
 ensure_env
 load_env
 step "sources"
-resolve_sources "$PORTAL" "$MEMORY"
+resolve_sources "$PORTAL" "$MEMORY" "$CONTEXT"
 step "ports"
 EXTRA_PORTS=""
 [ "$PORTAL" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS PORTAL_HOST_PORT"
 [ "$MEMORY" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS MEMORY_POSTGRES_HOST_PORT MEMORY_API_HOST_PORT MEMORY_INGESTOR_HOST_PORT MEMORY_JOBS_HOST_PORT"
+[ "$CONTEXT" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS CONTEXT_POSTGRES_HOST_PORT CONTEXT_API_HOST_PORT"
 # shellcheck disable=SC2086
 check_ports $EXTRA_PORTS
 info "all host ports are free (or already ours)"
+
+if [ "$CONTEXT" = 1 ]; then
+  step "context bridge keys"
+  ensure_context_keys
+  load_env
+fi
 
 step "build and start (project $PROJECT)"
 PROFILES=""
@@ -42,6 +51,10 @@ fi
 if [ "$MEMORY" = 1 ]; then
   if [ -f "$MEMORY_SRC/Dockerfile" ]; then PROFILES="${PROFILES:+$PROFILES,}memory"
   else warn "proba-memory has no Dockerfile in $MEMORY_SRC (try PROBA_SRC=worktree or PROBA_REF): starting the platform without the memory service"; MEMORY=0; fi
+fi
+if [ "$CONTEXT" = 1 ]; then
+  if [ -f "$CONTEXT_SRC/Dockerfile" ]; then PROFILES="${PROFILES:+$PROFILES,}context"
+  else warn "proba-context has no Dockerfile in $CONTEXT_SRC (try PROBA_SRC=worktree or PROBA_REF): starting the platform without the context bridge"; CONTEXT=0; fi
 fi
 [ -z "$PROFILES" ] || export COMPOSE_PROFILES="$PROFILES"
 if [ "$PORTAL" = 1 ]; then
@@ -74,6 +87,7 @@ step "status"
 PORTAL_LINE=""
 [ "$PORTAL" = 1 ] && PORTAL_LINE=$'\n'"  Proba Insights http://localhost:${PORTAL_HOST_PORT}   (health: /health)"
 [ "$MEMORY" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  Memory API     http://localhost:${MEMORY_API_HOST_PORT}   (/health, /v1/..., bearer token MEMORY_API_LOCAL_TOKEN in local/.env)"
+[ "$CONTEXT" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  Context API    http://localhost:${CONTEXT_API_HOST_PORT}   (/health, /ready, /v1/context/...)"
 cat <<MSG
 
 Platform is up.
@@ -82,5 +96,6 @@ Platform is up.
   Audit API      http://localhost:${AUDIT_API_HOST_PORT}   (/health, /v1/..., bearer token AUDIT_API_LOCAL_TOKEN in local/.env)
   ClickHouse     http://localhost:${CLICKHOUSE_HTTP_HOST_PORT}   (user proba, password in local/.env)${PORTAL_LINE}
 Next:  ./seed.sh   (generate varied traffic)   then   ./verify.sh   (PASS/FAIL checks)
+       ./verify-context.sh   (context bridge rating; needs --context, preferably with --memory)
 Docs:  docs/LOCAL_TESTING.md
 MSG

@@ -2,3 +2,5 @@
 .env
 .src/
 .state/
+keys/
+.reports/

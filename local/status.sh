@@ -57,4 +57,10 @@ if docker inspect "${PROJECT}-memory-api" >/dev/null 2>&1; then
   check_service memory-ingestor "http://127.0.0.1:${MEMORY_INGESTOR_HOST_PORT}/health"
   check_service memory-jobs "http://127.0.0.1:${MEMORY_JOBS_HOST_PORT}/health"
 fi
+# The context profile: reported only when its containers exist.
+if docker inspect "${PROJECT}-context-api" >/dev/null 2>&1; then
+  check_service context-postgres
+  check_job context-migrate
+  check_service context-api "http://127.0.0.1:${CONTEXT_API_HOST_PORT}/health"
+fi
 exit "$bad"
