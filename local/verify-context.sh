@@ -54,6 +54,8 @@ CONTEXT_URL="${CONTEXT_API_URL:-http://127.0.0.1:${CONTEXT_API_HOST_PORT:-3500}}
 HUB="${HUB_URL:-http://127.0.0.1:${HUB_HOST_PORT}}"
 AUDIT="${AUDIT_API_URL:-http://127.0.0.1:${AUDIT_API_HOST_PORT}}"
 MEMORY="${MEMORY_API_URL:-http://127.0.0.1:${MEMORY_API_HOST_PORT}}"
+# Used by later health / isolation checks (and kept for --trace / docs symmetry with verify.sh).
+: "${AUDIT}" "${MEMORY}"
 
 step "0. prerequisites"
 if ! docker inspect "${PROJECT}-context-api" >/dev/null 2>&1; then
@@ -120,8 +122,8 @@ hub_post "$TOKEN_C" send_message "{\"text\":\"Carol secret note ${CANARY_C}\"}" 
 
 hub_post "$TOKEN_A" create_goal '{"title":"UK home-search app","budget":{"daily":50,"total":400,"currency":"GBP"}}'
 GOAL_A="$LAST_ID"
-TRACE_A="$LAST_ID"
-pass "created goals A/B/C (A=$GOAL_A)"
+TRACE_A="${LAST_TRACE:-$GOAL_A}"
+pass "created goals A/B/C (A=$GOAL_A, trace=${TRACE_A})"
 
 # Conversation turns for A (Hub commands); context builds for scoring.
 declare -a PACKETS=()
@@ -211,13 +213,13 @@ leak=false
 printf '%s\n' "${PACKETS[@]}" | grep -q "$CANARY_B\|$CANARY_C" && leak=true
 add_check "B.canaryA" B 8 "$([ "$leak" = false ] && echo true || echo false)" "foreign canaries in A packets: $leak"
 
-# Bob/Carol packets
-packet_b="$(build_ctx "$(uuid)" "seedbed" "$GOAL_B" "$GOAL_B" "interpret_message" "bob-1" 2>/dev/null || echo '{}')"
-# Use bob session user — mint with bob's hub identity by building after login token introspection is limited; use goal-scoped assertion with bob email-derived uuid from create.
+# Bob/Carol packets (prove we can build for other goals; isolation of A's canaries is checked above).
 USER_B="$(uuid)"; USER_C="$(uuid)"
-# Prefer storing canary absence the other way: A's data strings should not appear in B if we can build as B.
-# Without Hub user ids for B/C matching create_goal, mark partial.
-add_check "B.isolationBC" B 4 true "B/C builds attempted; A canaries not asserted into B (best-effort)"
+packet_b="$(build_ctx "$USER_B" "seedbed" "$GOAL_B" "$GOAL_B" "interpret_message" "bob-1" 2>/dev/null || echo '{}')"
+packet_c="$(build_ctx "$USER_C" "seedbed" "$GOAL_C" "$GOAL_C" "interpret_message" "carol-1" 2>/dev/null || echo '{}')"
+bc_has_a=false
+printf '%s\n' "$packet_b" "$packet_c" | grep -q "$SECRET_A\|$EMAIL_A\|CANARY-A" && bc_has_a=true
+add_check "B.isolationBC" B 4 "$([ "$bc_has_a" = false ] && echo true || echo false)" "B/C packets lack A secrets (goals $GOAL_B / $GOAL_C)"
 
 redact_ok=true
 printf '%s\n' "${PACKETS[@]}" | grep -q "$SECRET_A\|$EMAIL_A" && redact_ok=false
@@ -243,8 +245,6 @@ printf '%s\n' "${PACKETS[@]}" | jq -s 'all(.[]; (.manifest.totals.tokens // 0) <
 add_check "C.budget" C 5 "$bud_ok" "token totals <= 6000"
 
 hash1="$(jq -r '.packetHash // empty' <<<"${PACKETS[0]:-\{\}}")"
-dup="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "interpret_message" "step-1-dup" 2>/dev/null || echo '{}')"
-hash2="$(jq -r '.packetHash // empty' <<<"$dup")"
 # Different stepId may change hash; compare template build with same stepId
 dup2="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "interpret_message" "step-1" 2>/dev/null || echo '{}')"
 hash3="$(jq -r '.packetHash // empty' <<<"$dup2")"
@@ -279,7 +279,6 @@ e_audit=false
 [ "${ctx_events:-0}" -ge 1 ] 2>/dev/null && e_audit=true
 add_check "E.audit" E 4 "$e_audit" "context.* events for goal: $ctx_events"
 
-manifest_ok=false
 # Without Firebase admin, skip counting as fail
 add_check "E.manifest" E 3 true "manifest stored on build (Postgres/Redis); admin GET needs Firebase allow-list" false
 

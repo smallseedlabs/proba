@@ -64,7 +64,9 @@ ensure_env() {
   for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse AUDIT_CONTENT_MASK_PII=true \
              "PORTAL_MEMORY_URL=http://127.0.0.1:3420" REDIS_USER=proba \
              CLICKHOUSE_CONSUMER_USER=proba_consumer CLICKHOUSE_API_USER=proba_api CLICKHOUSE_MIGRATOR_USER=proba_migrator \
-             AUDIT_STREAM_MAX_AGE_HOURS=72; do
+             AUDIT_STREAM_MAX_AGE_HOURS=72 \
+             HUB_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem \
+             CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem; do
     if ! grep -Eq "^${def%%=*}=" "$f"; then
       printf '%s\n' "$def" >> "$f"
       info "added ${def%%=*}=${def#*=} to local/.env (see docs/LOCAL_TESTING.md)"
