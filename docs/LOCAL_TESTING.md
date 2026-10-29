@@ -1,6 +1,7 @@
 # Testing the whole platform locally
 
 One command brings up the Hub, the web app, the audit pipeline, the audit API and the metrics pipeline (with **stub** ad-platform data) on your machine.
+Optional profiles add Proba Insights (`--portal`), the memory service (`--memory`) and the context bridge (`--context`).
 Another one checks that what runs matches the design. Everything lives in [`local/`](../local); nothing in it is needed in production.
 
 ```bash
@@ -44,6 +45,8 @@ All ports are bound to `127.0.0.1`. They are deliberately unusual so they do not
 | Memory API (profile `memory`) | http://localhost:3420 | `/health`, `/ready`, `/v1/...` (read-only). Bearer token: `MEMORY_API_LOCAL_TOKEN` in `local/.env`; see "Memory profile" |
 | memory-ingestor / memory-jobs (profile `memory`) | :3421 / :3422 | `/health` |
 | Postgres with pgvector (profile `memory`) | localhost:55434 | db `proba_memory`, user `proba`, password `MEMORY_POSTGRES_PASSWORD` in `local/.env` |
+| Context API (profile `context`) | http://localhost:3500 | `/health`, `/ready`, `/v1/context/...`; see "Context bridge" |
+| Postgres (profile `context`) | localhost:55435 | db `proba_context`, user `proba`, password `CONTEXT_POSTGRES_PASSWORD` in `local/.env` |
 
 The compose project is `proba-local` and every container is called `proba-local-*`, so it runs next to other stacks (for example a `proba-audit-*` development
 stack). Data is in the named volumes `proba-local_*_data`.
@@ -70,7 +73,8 @@ Local does not mean open. CI (`scripts/check-compose-security.mjs`) enforces all
 
 | Script | What it does |
 |--------|--------------|
-| `up.sh [--portal] [--memory] [--no-build] [--no-wait]` | checks the ports, snapshots the sources, builds, **applies the ClickHouse migrations** (including 0008, the table for raw text), starts, waits until everything is healthy |
+| `up.sh [--portal] [--memory] [--context] [--no-build] [--no-wait]` | checks the ports, snapshots the sources, builds, **applies the ClickHouse migrations** (including 0008, the table for raw text), starts, waits until everything is healthy |
+| `verify-context.sh [--self-test\|--quick\|--show-packets\|--step N\|--keep\|--trace ID]` | context bridge conversation rating (needs `--context`; see "Context bridge") |
 | `status.sh [--quiet]` | one line per service (container health plus its HTTP `/health`); non-zero exit when anything is down |
 | `seed.sh` | ~40 commands through `POST /v1/commands` (exactly what the web app sends): see below |
 | `verify.sh [--quick] [--trace ID]` | the automated checks; `--quick` skips the slow ones; `--trace` prints one trace's spans |
@@ -187,6 +191,31 @@ curl -s -H "authorization: Bearer $MEMORY_API_LOCAL_TOKEN" -H 'content-type: app
 
 `./status.sh` reports the memory containers when they exist. `./down.sh` stops them and `./reset.sh --yes` also deletes the `memory_postgres_data` volume.
 `PORTAL_MEMORY_URL` (see "Portal profile") can point at `http://localhost:3420` once the portal's memory screens read from this API.
+
+## Context bridge
+
+`./up.sh --context` also builds and starts the **context bridge** (`proba-context`) on port **3500** (bound to `127.0.0.1`). Combine with memory (and optionally the portal):
+
+```bash
+./up.sh --portal --memory --context
+# While Phase 6 is on a feature branch, build from the worktree:
+PROBA_SRC=worktree ./up.sh --portal --memory --context
+```
+
+| Container | Role | Host port |
+|-----------|------|-----------|
+| `context-postgres` | packet manifests only (`context_packets`; never item text) | 55435 |
+| `context-migrate` | one-shot SQL migrations | none |
+| `context-api` | `POST /v1/context/build`, needs, packets, `/ready`, `/metrics` | 3500 |
+
+* **Keys**: `up.sh --context` generates Ed25519 pairs under `local/keys/` (gitignored) and writes container paths into `local/.env` (`HUB_ASSERTION_*`, `CONTEXT_SERVICE_*`). The Hub gets `CONTEXT_BRIDGE_URL=http://context-api:3500`; audit-api and memory-api enable the `context-reader` role against the same public JWKS. Never commit keys; production must use vault/`*_FILE` mounts (the bridge runs as `NODE_ENV=development` in this stack so local keys are accepted).
+* **Status**: `./status.sh` reports context-postgres, context-migrate and context-api when they exist.
+* **Rating script**: `./verify-context.sh` plays a multi-turn conversation, builds context for each step, scores checks out of 100 (PASS ≥ 90 with group B all passing), writes `local/.reports/context-verify-<timestamp>.json`, and exits non-zero on FAIL. Prerequisites: stack up with `--context` (preferably `--memory`), `AUDIT_API_TOKEN_VERIFIER=static`, `MEMORY_API_TOKEN_VERIFIER=static`, `DEV_LOGIN_ENABLED=true`. It refuses non-`127.0.0.1` URLs.
+  * `./verify-context.sh --self-test` — no stack; proves scoring fails on leak / over-budget / missing-gap fixtures.
+  * `./verify-context.sh --show-packets` — readable packet summaries (no foreign canaries).
+  * `./verify-context.sh --quick` / `--step N` / `--keep` / `--trace ID`.
+* **Caching**: edit the bridge config `sources.memory.cache.enabled: true` and `ttlSeconds: 30` (in the proba-context checkout used to build the image), rebuild/restart context-api, re-run a build and read `/metrics` (`context_cache_hits_total`).
+* **Manifests**: admin `GET /v1/context/packets?goalId=` (Firebase allow-list when configured); each successful build stores the manifest in Postgres.
 
 ## Raw text of events
 

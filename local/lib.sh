@@ -33,12 +33,15 @@ need() {
 # (`${NAME:?...}`): there is no default password anywhere.
 GENERATED_SECRETS="JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN \
   MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN ANCHOR_HMAC_KEY \
-  REDIS_PASSWORD CLICKHOUSE_CONSUMER_PASSWORD CLICKHOUSE_API_PASSWORD CLICKHOUSE_MIGRATOR_PASSWORD"
+  REDIS_PASSWORD CLICKHOUSE_CONSUMER_PASSWORD CLICKHOUSE_API_PASSWORD CLICKHOUSE_MIGRATOR_PASSWORD \
+  CONTEXT_POSTGRES_PASSWORD"
 
 # Create local/.env from the example on first run and fill the secrets with random,
 # local-only values. Existing values are never overwritten. Nothing is printed.
 ensure_env() {
   local f="$LOCAL_DIR/.env"
+  mkdir -p "$LOCAL_DIR/keys" "$LOCAL_DIR/.reports"
+  chmod 700 "$LOCAL_DIR/keys" 2>/dev/null || true
   if [ ! -f "$f" ]; then
     cp "$LOCAL_DIR/.env.example" "$f"
     chmod 600 "$f"
@@ -76,7 +79,7 @@ load_env() {
   [ -f "$LOCAL_DIR/.env" ] || die "local/.env is missing: run ./up.sh first"
   # Settings given on the command line (PROBA_SRC=worktree ./up.sh) win over local/.env.
   local keep="" v
-  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR PROBA_MEMORY_DIR; do
+  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR PROBA_MEMORY_DIR PROBA_CONTEXT_DIR; do
     if [ -n "${!v+x}" ]; then keep="$keep$v=$(printf '%q' "${!v}") "; fi
   done
   set -a
@@ -87,16 +90,18 @@ load_env() {
   # down.sh, status.sh and reset.sh run on a local/.env from before a secret existed (up.sh generates it): compose still has to
   # interpolate the whole file, so fill in a placeholder. up.sh calls ensure_env first, so it never sees one.
   local gk
-  for gk in $GENERATED_SECRETS; do
+  for gk in $GENERATED_SECRETS CONTEXT_POSTGRES_PASSWORD; do
     [ -n "${!gk:-}" ] || export "$gk=not-generated-run-up.sh"
   done
   : "${WEB_HOST_PORT:=5180}" "${HUB_HOST_PORT:=3300}" "${POSTGRES_HOST_PORT:=55433}" "${REDIS_HOST_PORT:=56380}"
   : "${CLICKHOUSE_HTTP_HOST_PORT:=58125}" "${AUDIT_CONSUMER_HOST_PORT:=3401}" "${METRICS_INGESTER_HOST_PORT:=3402}"
   : "${ROLLUP_HOST_PORT:=3403}" "${AUDIT_API_HOST_PORT:=3400}" "${PORTAL_HOST_PORT:=3410}"
   : "${MEMORY_POSTGRES_HOST_PORT:=55434}" "${MEMORY_API_HOST_PORT:=3420}" "${MEMORY_INGESTOR_HOST_PORT:=3421}" "${MEMORY_JOBS_HOST_PORT:=3422}"
+  : "${CONTEXT_POSTGRES_HOST_PORT:=55435}" "${CONTEXT_API_HOST_PORT:=3500}"
   export WEB_HOST_PORT HUB_HOST_PORT POSTGRES_HOST_PORT REDIS_HOST_PORT CLICKHOUSE_HTTP_HOST_PORT
   export AUDIT_CONSUMER_HOST_PORT METRICS_INGESTER_HOST_PORT ROLLUP_HOST_PORT AUDIT_API_HOST_PORT PORTAL_HOST_PORT
   export MEMORY_POSTGRES_HOST_PORT MEMORY_API_HOST_PORT MEMORY_INGESTOR_HOST_PORT MEMORY_JOBS_HOST_PORT
+  export CONTEXT_POSTGRES_HOST_PORT CONTEXT_API_HOST_PORT
 }
 
 # ---------------------------------------------------------------- compose
@@ -133,37 +138,92 @@ snapshot_repo() { # name dir
   fi
 }
 
-# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC (absolute build contexts).
-# resolve_sources [want_portal 0|1] [want_memory 0|1]
+# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC (absolute build contexts).
+# resolve_sources [want_portal 0|1] [want_memory 0|1] [want_context 0|1]
 resolve_sources() {
-  local mode="${PROBA_SRC:-main}" want_portal="${1:-0}" want_memory="${2:-0}"
-  local hub web audit portal memory
+  local mode="${PROBA_SRC:-main}" want_portal="${1:-0}" want_memory="${2:-0}" want_context="${3:-0}"
+  local hub web audit portal memory context
   hub="$(abs_dir "${PROBA_HUB_DIR:-../../proba-hub}")" || true
   web="$(abs_dir "${PROBA_WEB_DIR:-../../proba-web}")" || true
   audit="$(abs_dir "${PROBA_AUDIT_DIR:-../../proba-audit}")" || true
   portal="$(abs_dir "${PROBA_PORTAL_DIR:-../../proba-portal}")" || true
   memory="$(abs_dir "${PROBA_MEMORY_DIR:-../../proba-memory}")" || true
+  context="$(abs_dir "${PROBA_CONTEXT_DIR:-../../proba-context}")" || true
   if [ "$want_memory" = "1" ] && [ -z "$memory" ]; then die "proba-memory checkout not found at ${PROBA_MEMORY_DIR:-../../proba-memory} (set PROBA_MEMORY_DIR in local/.env)"; fi
+  if [ "$want_context" = "1" ] && [ -z "$context" ]; then die "proba-context checkout not found at ${PROBA_CONTEXT_DIR:-../../proba-context} (set PROBA_CONTEXT_DIR in local/.env)"; fi
   [ -n "$hub" ] || die "proba-hub checkout not found at ${PROBA_HUB_DIR:-../../proba-hub} (set PROBA_HUB_DIR in local/.env)"
   [ -n "$web" ] || die "proba-web checkout not found at ${PROBA_WEB_DIR:-../../proba-web} (set PROBA_WEB_DIR in local/.env)"
   [ -n "$audit" ] || die "proba-audit checkout not found at ${PROBA_AUDIT_DIR:-../../proba-audit} (set PROBA_AUDIT_DIR in local/.env)"
   case "$mode" in
     worktree)
       info "building from the working trees of the sibling checkouts (PROBA_SRC=worktree)"
-      HUB_SRC="$hub"; WEB_SRC="$web"; AUDIT_SRC="$audit"; PORTAL_SRC="$portal"; MEMORY_SRC="${memory:-$SRC_DIR/proba-memory}" ;;
+      HUB_SRC="$hub"; WEB_SRC="$web"; AUDIT_SRC="$audit"; PORTAL_SRC="$portal"
+      MEMORY_SRC="${memory:-$SRC_DIR/proba-memory}"; CONTEXT_SRC="${context:-$SRC_DIR/proba-context}" ;;
     main)
       info "snapshotting ${PROBA_REF:-origin/main} of the sibling checkouts into local/.src (PROBA_SRC=main)"
       snapshot_repo proba-hub "$hub" || die "cannot snapshot proba-hub"
       snapshot_repo proba-web "$web" || die "cannot snapshot proba-web"
       snapshot_repo proba-audit "$audit" || die "cannot snapshot proba-audit"
       HUB_SRC="$SRC_DIR/proba-hub"; WEB_SRC="$SRC_DIR/proba-web"; AUDIT_SRC="$SRC_DIR/proba-audit"
-      PORTAL_SRC="$SRC_DIR/proba-portal"; MEMORY_SRC="$SRC_DIR/proba-memory"
+      PORTAL_SRC="$SRC_DIR/proba-portal"; MEMORY_SRC="$SRC_DIR/proba-memory"; CONTEXT_SRC="$SRC_DIR/proba-context"
       if [ "$want_portal" = "1" ] && [ -n "$portal" ]; then snapshot_repo proba-portal "$portal" || true; fi
-      if [ "$want_memory" = "1" ]; then snapshot_repo proba-memory "$memory" || die "cannot snapshot proba-memory"; fi ;;
+      if [ "$want_memory" = "1" ]; then snapshot_repo proba-memory "$memory" || die "cannot snapshot proba-memory"; fi
+      if [ "$want_context" = "1" ]; then snapshot_repo proba-context "$context" || die "cannot snapshot proba-context"; fi ;;
     *) die "PROBA_SRC must be main or worktree (got $mode)" ;;
   esac
   [ -f "$AUDIT_SRC/Dockerfile" ] || die "no Dockerfile in $AUDIT_SRC"
-  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC
+  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC
+}
+
+# Generate Ed25519 pairs into local/keys/ (once) and write container paths into local/.env.
+ensure_context_keys() {
+  local f="$LOCAL_DIR/.env" keys="$LOCAL_DIR/keys" out
+  mkdir -p "$keys"
+  chmod 700 "$keys" 2>/dev/null || true
+  need node
+  out="$(node "$LOCAL_DIR/tools/generate-context-keys.mjs" "$keys")" || die "failed to generate context bridge key pairs"
+  # Container paths (keys mounted at /run/proba/keys).
+  local pairs="HUB_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem
+HUB_ASSERTION_PUBLIC_KEY_FILE=/run/proba/keys/hub-assertion.public.jwks.json
+HUB_ASSERTION_KEY_ID=hub-key-1
+CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem
+CONTEXT_SERVICE_PUBLIC_KEY_FILE=/run/proba/keys/context-service.public.jwks.json
+CONTEXT_SERVICE_KEY_ID=bridge-key-1
+CONTEXT_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem
+CONTEXT_BRIDGE_URL=http://context-api:3500
+HUB_CONTEXT_READER_ENABLED=true
+AUDIT_API_CONTEXT_READER_ENABLED=true
+MEMORY_API_CONTEXT_READER_ENABLED=true
+CONTEXT_POSTGRES_PASSWORD="
+  local line key val
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    key="${line%%=*}"; val="${line#*=}"
+    if [ "$key" = "CONTEXT_POSTGRES_PASSWORD" ]; then
+      if ! grep -Eq "^CONTEXT_POSTGRES_PASSWORD=.+" "$f"; then
+        val="$(openssl rand -hex 32)"
+        if grep -Eq "^CONTEXT_POSTGRES_PASSWORD=" "$f"; then
+          awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k {print k "=" v; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        else
+          printf '%s=%s\n' "$key" "$val" >> "$f"
+        fi
+        info "generated a local-only CONTEXT_POSTGRES_PASSWORD in local/.env"
+      fi
+      continue
+    fi
+    if ! grep -Eq "^${key}=.+" "$f"; then
+      if grep -Eq "^${key}=" "$f"; then
+        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k {print k "=" v; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      else
+        printf '%s=%s\n' "$key" "$val" >> "$f"
+      fi
+      info "set $key in local/.env for the context bridge"
+    fi
+  done <<EOF
+$pairs
+EOF
+  chmod 600 "$f"
+  : "$out"
 }
 
 port_listening() {
