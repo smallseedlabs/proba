@@ -10,3 +10,5 @@ cd local && ./up.sh && ./seed.sh && ./verify.sh
 ```
 
 The local stack is locked down: ports on `127.0.0.1` only, no default passwords (`./up.sh` generates random ones into `local/.env`), Redis with an ACL user and password, and least-privilege ClickHouse users. See [Security of the local stack](docs/LOCAL_TESTING.md#security-of-the-local-stack). Branch protection for `main`: [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md).
+
+Production-oriented Swarm **artifacts** (not a live deployment) live in [`deploy/`](deploy/README.md). Operator docs: [rollout/rollback](docs/DEPLOYMENT.md), [backup/restore](docs/BACKUP_RESTORE.md), [security defaults](docs/SECURITY_DEFAULTS.md). Those files do not replace `local/` and are not a production clearance.

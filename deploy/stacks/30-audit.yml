@@ -1,0 +1,266 @@
+# Audit trail and metrics workers (proba-audit). Optional overlay companions: none of these
+# processes are the Hub. Do not `docker stack deploy` from an agent.
+#
+# Production refusals in the processes (do not set the opposite here):
+#   AUDIT_API_TOKEN_VERIFIER=static, in-memory adapters without ALLOW_IN_MEMORY_ADAPTERS,
+#   ClickHouse admin/migrator as the runtime user, empty ANCHOR_HMAC_KEY, stub connectors.
+# PLATFORM_CONNECTORS is empty: the ingester idles. Stub connectors are local-only.
+# AUDIT_CONTENT_ENABLED defaults false (Hub production default). Set true explicitly if needed.
+version: "3.8"
+
+x-audit-env: &audit-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: proba
+  CLICKHOUSE_DATABASE: proba_audit
+  CLICKHOUSE_CONSUMER_USER: ${CLICKHOUSE_CONSUMER_USER:-proba_consumer}
+  CLICKHOUSE_API_USER: ${CLICKHOUSE_API_USER:-proba_api}
+  CLICKHOUSE_MIGRATOR_USER: ${CLICKHOUSE_MIGRATOR_USER:-proba_migrator}
+  EVENT_BUS: redis-streams
+  AUDIT_STORE: clickhouse
+  AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-false}
+  AUDIT_CONTENT_STORE: clickhouse
+  METRICS_STORE: clickhouse
+  CHECKPOINT_STORE: clickhouse
+  QUARANTINE_STORE: clickhouse
+  ANCHOR_STORE: postgres
+  ANCHOR_HMAC_KEY: ${ANCHOR_HMAC_KEY:?set ANCHOR_HMAC_KEY}
+  ANCHOR_DATABASE_URL: postgresql://anchors:${ANCHOR_DB_PASSWORD:?set ANCHOR_DB_PASSWORD}@anchor-db:5432/proba_audit_anchors
+  LEASE_STORE: redis
+  PLATFORM_CONNECTORS: ${PLATFORM_CONNECTORS:-}
+  INGEST_WORKSPACE_ID: ${INGEST_WORKSPACE_ID:-seedbed}
+  AUDIT_STREAM_MAX_AGE_HOURS: ${AUDIT_STREAM_MAX_AGE_HOURS:-72}
+
+services:
+  audit-migrate:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-audit-migrate:${VERSION:-latest}
+    environment:
+      <<: *audit-env
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CONSUMER_PASSWORD: ${CLICKHOUSE_CONSUMER_PASSWORD:?set CLICKHOUSE_CONSUMER_PASSWORD}
+      CLICKHOUSE_API_PASSWORD: ${CLICKHOUSE_API_PASSWORD:?set CLICKHOUSE_API_PASSWORD}
+      CLICKHOUSE_MIGRATOR_PASSWORD: ${CLICKHOUSE_MIGRATOR_PASSWORD:?set CLICKHOUSE_MIGRATOR_PASSWORD}
+    networks:
+      - proba-network
+    deploy:
+      mode: replicated-job
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  audit-consumer:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-audit-consumer:${VERSION:-latest}
+    environment:
+      <<: *audit-env
+      CLICKHOUSE_CONSUMER_PASSWORD: ${CLICKHOUSE_CONSUMER_PASSWORD:?set CLICKHOUSE_CONSUMER_PASSWORD}
+      PORT: "3101"
+    networks:
+      - proba-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3101)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      labels:
+        proba.component: audit-consumer
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  audit-api:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-audit-api:${VERSION:-latest}
+    environment:
+      <<: *audit-env
+      CLICKHOUSE_API_PASSWORD: ${CLICKHOUSE_API_PASSWORD:?set CLICKHOUSE_API_PASSWORD}
+      PORT: "3100"
+      AUDIT_API_TOKEN_VERIFIER: firebase
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?set FIREBASE_PROJECT_ID}
+      AUDIT_API_ADMIN_EMAILS: ${AUDIT_API_ADMIN_EMAILS:?set AUDIT_API_ADMIN_EMAILS}
+      AUDIT_API_ALLOWED_EMAILS: ${AUDIT_API_ALLOWED_EMAILS:-}
+      AUDIT_API_ALLOWED_EMAIL_DOMAINS: ${AUDIT_API_ALLOWED_EMAIL_DOMAINS:-}
+      AUDIT_API_WORKSPACE_ID: ${AUDIT_API_WORKSPACE_ID:-seedbed}
+      AUDIT_API_CORS_ORIGINS: ${PUBLIC_PORTAL_ORIGIN:-}
+      AUDIT_API_RATE_LIMITER: redis
+      AUDIT_API_SCOPE_SOURCE: connectors
+      AUDIT_API_CONTEXT_READER_ENABLED: "true"
+      CONTEXT_SERVICE_PUBLIC_KEY_FILE: /run/secrets/context_service_public_jwks
+      HUB_ASSERTION_PUBLIC_KEY_FILE: /run/secrets/hub_assertion_public_jwks
+    networks:
+      - proba-network
+    secrets:
+      - context_service_public_jwks
+      - hub_assertion_public_jwks
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3100)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      labels:
+        proba.component: audit-api
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  metrics-ingester:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-metrics-ingester:${VERSION:-latest}
+    environment:
+      <<: *audit-env
+      CLICKHOUSE_CONSUMER_PASSWORD: ${CLICKHOUSE_CONSUMER_PASSWORD:?set CLICKHOUSE_CONSUMER_PASSWORD}
+      PORT: "3102"
+    networks:
+      - proba-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3102)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      labels:
+        proba.component: metrics-ingester
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  rollup:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-rollup:${VERSION:-latest}
+    environment:
+      <<: *audit-env
+      CLICKHOUSE_CONSUMER_PASSWORD: ${CLICKHOUSE_CONSUMER_PASSWORD:?set CLICKHOUSE_CONSUMER_PASSWORD}
+      PORT: "3103"
+    networks:
+      - proba-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3103)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      labels:
+        proba.component: rollup
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+networks:
+  proba-network:
+    name: proba-network
+    external: true
+
+secrets:
+  context_service_public_jwks:
+    external: true
+  hub_assertion_public_jwks:
+    external: true

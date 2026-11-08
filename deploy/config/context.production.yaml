@@ -1,0 +1,143 @@
+# Production overlay for proba-context.
+# Mounted over /app/config/context.config.yaml so the image's templates/,
+# policy.yaml and tools.yaml stay in the same directory.
+# Derived from proba-context@7f04e403 (config/context.config.yaml) with one
+# production-required change: cacheStore.backend is redis because the shipped
+# file uses memory with allowMemoryInProduction: false, which production refuses.
+# Do not add unknown keys; the process rejects them.
+version: "1"
+
+identity:
+  mode: act_as_assertion
+  allowLocal: false
+  authorizeCache:
+    enabled: false
+    ttlSeconds: 0
+
+cacheStore:
+  backend: redis
+  allowMemoryInProduction: false
+
+packetStore:
+  retentionDays: 7
+  purgeIntervalMinutes: 60
+
+sources:
+  policy:
+    enabled: true
+    timeoutMs: 500
+    tokenShare: 0.10
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  task:
+    enabled: true
+    timeoutMs: 1000
+    tokenShare: 0.15
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  conversation:
+    enabled: true
+    timeoutMs: 1000
+    tokenShare: 0.30
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  memory:
+    enabled: true
+    timeoutMs: 1500
+    tokenShare: 0.15
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  audit_history:
+    enabled: true
+    timeoutMs: 1500
+    tokenShare: 0.10
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  analytics:
+    enabled: true
+    timeoutMs: 2000
+    tokenShare: 0.10
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+  tools:
+    enabled: true
+    timeoutMs: 500
+    tokenShare: 0.10
+    cache:
+      enabled: false
+      ttlSeconds: 0
+      maxEntries: 1000
+
+budget:
+  defaultTokens: 6000
+  maxTokens: 12000
+  priorities:
+    policy: 0
+    task: 1
+    conversation: 2
+    memory: 3
+    audit_history: 4
+    analytics: 5
+    tools: 6
+
+# Hosts copied from the shipped file. Overlay DNS names hub / audit-api /
+# memory-api / redis / context-postgres must match the stack service names.
+allowedDownstreamHosts:
+  - proba-audit:3400
+  - proba-memory:3420
+  - proba-hub:3300
+  - 127.0.0.1:3400
+  - 127.0.0.1:3420
+  - 127.0.0.1:3300
+  - 127.0.0.1:3500
+  - hub:3000
+  - audit-api:3100
+  - memory-api:3200
+  - redis:6379
+  - postgres:5432
+  - context-postgres:5432
+  - 127.0.0.1:5432
+  - 127.0.0.1:55435
+
+limits:
+  maxNeedsPerRequest: 20
+  maxItemsPerSource: 50
+  maxItemChars: 4000
+  maxRequestBytes: 65536
+
+needs:
+  maxRoundsPerStep: 2
+  extraTokenShare: 0.3
+  kinds:
+    memory_search:
+      source: memory
+      maxItems: 20
+      maxTokens: 1500
+    analytics_compare:
+      source: analytics
+      maxItems: 10
+      maxTokens: 1000
+      allowedWindows: [1d, 7d, 14d, 30d]
+    audit_trace:
+      source: audit_history
+      maxItems: 100
+      maxTokens: 2000
+    conversation_before:
+      source: conversation
+      maxItems: 50
+      maxTokens: 2000
+
+redaction:
+  pii: true

@@ -44,6 +44,34 @@ jobs:
           HUB_SRC=. WEB_SRC=. AUDIT_SRC=. PORTAL_SRC=. MEMORY_SRC=. \
             docker compose -p proba-ci --env-file local/.env -f local/docker-compose.yml --profile portal --profile memory config -q
 
+  stack-security:
+    name: Swarm stack security (secrets, contracted probes, rollback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - name: Install the checker's dependency
+        run: npm install --no-save --no-package-lock js-yaml@4
+      - name: Static stack guards and negative tests
+        run: bash deploy/scripts/validate.sh
+      - name: Operator scripts refuse unscoped use
+        run: |
+          set -euo pipefail
+          bash deploy/scripts/rollout.sh | grep -q 'dry-run complete'
+          ! bash deploy/scripts/backup.sh >/dev/null 2>&1
+          ! bash deploy/scripts/restore.sh >/dev/null 2>&1
+          ! bash deploy/scripts/rollback.sh >/dev/null 2>&1
+
+  isolated-backup-drill:
+    name: Isolated backup restore drill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Disposable labeled Postgres dump/restore
+        run: bash deploy/scripts/isolated-backup-drill.sh --require-runtime
+
   scripts:
     name: Shellcheck and parse
     runs-on: ubuntu-latest
@@ -52,10 +80,10 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: bash -n
-        run: for f in local/*.sh; do bash -n "$f"; done
+        run: for f in local/*.sh deploy/scripts/*.sh; do bash -n "$f"; done
       - name: shellcheck
         # Fail on warning+; SC2015 etc. are info-level on intentional A && B || C in verify.sh
-        run: shellcheck -S warning -x local/*.sh
+        run: shellcheck -S warning -x local/*.sh deploy/scripts/*.sh
 
   gitleaks:
     name: Gitleaks
@@ -102,7 +130,7 @@ jobs:
               fi
             done < <(grep -oE '\[[^]]*\]\([^)]+\)' "$file" | sed -E 's/^\[[^]]*\]\(([^)]+)\)$/\1/' || true)
           }
-          for f in README.md docs/*.md; do
+          for f in README.md docs/*.md deploy/*.md deploy/IMAGE_PROVENANCE.md; do
             [ -f "$f" ] || continue
             check_file "$f"
           done
