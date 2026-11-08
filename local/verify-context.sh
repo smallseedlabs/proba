@@ -56,6 +56,8 @@ AUDIT="${AUDIT_API_URL:-http://127.0.0.1:${AUDIT_API_HOST_PORT}}"
 MEMORY="${MEMORY_API_URL:-http://127.0.0.1:${MEMORY_API_HOST_PORT}}"
 # Used by later health / isolation checks (and kept for --trace / docs symmetry with verify.sh).
 : "${AUDIT}" "${MEMORY}"
+# Scalar ClickHouse helper (same as verify.sh); ch() lives in lib.sh.
+chv() { ch "$1" 2>/dev/null | tr -d '[:space:]'; }
 
 step "0. prerequisites"
 if ! docker inspect "${PROJECT}-context-api" >/dev/null 2>&1; then
@@ -111,19 +113,51 @@ step "1. logins and parallel canary traffic"
 TOKEN_A="$(hub_token "$ALICE")" || die "alice login failed"
 TOKEN_B="$(hub_token "$BOB")" || die "bob login failed"
 TOKEN_C="$(hub_token "$CAROL")" || die "carol login failed"
+# Hub has no GET /v1/session; user id comes from /dev/login (and is embedded in the JWT).
+USER_A="$(curl -sS -m 10 -X POST "$(hub_url)/dev/login" -H 'content-type: application/json' \
+  -d "$(jq -nc --arg e "$ALICE" --arg n Alice '{email:$e,name:$n}')" | jq -r '.user.id // empty')"
+[ -n "$USER_A" ] || die "could not resolve Alice user id from /dev/login"
+info "Alice userId=$USER_A"
+
+# LAST_ID from hub_post is the clientMsgId/traceId, not the goal UUID.
+# Hub events carry goalId on payload and threadId on the event root.
+last_goal_thread() {
+  # prints "goalId<TAB>threadId" or returns 1
+  local token="$1" i=0 pair=""
+  while [ "$i" -lt 15 ]; do
+    pair="$(hub_events "$token" | jq -r '
+      [.[]
+        | select(.type=="goal_updated" or .type=="goal_created")
+        | [
+            (.goalId // .payload.goalId // empty),
+            (.threadId // .payload.threadId // empty)
+          ]
+      ]
+      | map(select(.[0] != "" and .[1] != ""))
+      | last // empty
+      | if . == "" then empty else @tsv end')"
+    [ -n "$pair" ] && { printf '%s' "$pair"; return 0; }
+    sleep 0.4
+    i=$((i + 1))
+  done
+  return 1
+}
 
 hub_post "$TOKEN_B" create_goal "{\"title\":\"Bob product ${CANARY_B}\",\"budget\":{\"daily\":40,\"total\":200,\"currency\":\"GBP\"}}"
-GOAL_B="$LAST_ID"
-hub_post "$TOKEN_B" send_message "{\"text\":\"Bob secret note ${CANARY_B}\"}" ""
+IFS=$'\t' read -r GOAL_B THREAD_B <<<"$(last_goal_thread "$TOKEN_B")" || die "could not resolve Bob goal/thread"
+[ -n "$GOAL_B" ] && [ -n "$THREAD_B" ] || die "could not resolve Bob goal/thread"
+hub_post "$TOKEN_B" send_message "{\"text\":\"Bob secret note ${CANARY_B}\"}" "$THREAD_B"
 # Carol: Hub scopes to seedbed locally; canary still used for packet string checks.
 hub_post "$TOKEN_C" create_goal "{\"title\":\"Carol other ${CANARY_C}\",\"budget\":{\"daily\":10,\"total\":50,\"currency\":\"GBP\"}}"
-GOAL_C="$LAST_ID"
-hub_post "$TOKEN_C" send_message "{\"text\":\"Carol secret note ${CANARY_C}\"}" ""
+IFS=$'\t' read -r GOAL_C THREAD_C <<<"$(last_goal_thread "$TOKEN_C")" || die "could not resolve Carol goal/thread"
+[ -n "$GOAL_C" ] && [ -n "$THREAD_C" ] || die "could not resolve Carol goal/thread"
+hub_post "$TOKEN_C" send_message "{\"text\":\"Carol secret note ${CANARY_C}\"}" "$THREAD_C"
 
 hub_post "$TOKEN_A" create_goal '{"title":"UK home-search app","budget":{"daily":50,"total":400,"currency":"GBP"}}'
-GOAL_A="$LAST_ID"
-TRACE_A="${LAST_TRACE:-$GOAL_A}"
-pass "created goals A/B/C (A=$GOAL_A, trace=${TRACE_A})"
+TRACE_A="${LAST_TRACE_HEADER:-$LAST_ID}"
+IFS=$'\t' read -r GOAL_A THREAD_A <<<"$(last_goal_thread "$TOKEN_A")" || die "could not resolve Alice goal/thread"
+[ -n "$GOAL_A" ] && [ -n "$THREAD_A" ] || die "could not resolve Alice goal/thread"
+pass "created goals A/B/C (A=$GOAL_A thread=$THREAD_A, trace=${TRACE_A})"
 
 # Conversation turns for A (Hub commands); context builds for scoring.
 declare -a PACKETS=()
@@ -147,31 +181,23 @@ for st in "${STEPS[@]}"; do
   if [ -n "$STEP" ] && [ "$i" != "$STEP" ]; then continue; fi
   msg="${MSGS[$((i - 1))]:-}"
   if [ -n "$msg" ]; then
-    hub_post "$TOKEN_A" send_message "$(jq -nc --arg t "$msg" '{text:$t}')" "" || true
+    hub_post "$TOKEN_A" send_message "$(jq -nc --arg t "$msg" '{text:$t}')" "$THREAD_A" || true
   fi
-  packet="$(build_ctx "$(curl -sS -m 10 "$HUB/v1/session" -H "authorization: Bearer $TOKEN_A" | jq -r .userId // .id // "alice")" "seedbed" "$GOAL_A" "$GOAL_A" "$st" "step-$i")" || packet='{"error":"build_failed"}'
-  # Prefer Hub session user id when available; fall back to email-derived local identity is not used.
+  packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "$st" "step-$i")" || packet='{"error":"build_failed"}'
   if printf '%s' "$packet" | jq -e '.packetId' >/dev/null 2>&1; then
     PACKETS+=("$packet")
     [ "$SHOW" = 1 ] && jq '{packetId,packetHash,stepId,sections:[.sections[]|{kind,tokens,itemCount:(.items|length)}],gaps,manifest:{totals}}' <<<"$packet"
   else
-    # Resolve userId from Hub events / create_goal actor — use a stable UUID from goal create by querying session.
-    USER_A="$(curl -sS -m 10 "$HUB/dev/login" -H 'content-type: application/json' -d "{\"email\":\"$ALICE\",\"name\":\"Alice\"}" | jq -r '.user.id // .userId // empty')"
-    [ -z "$USER_A" ] && USER_A="$(uuid)"
-    packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "$st" "step-$i")" || packet='{}'
+    warn "context build failed for step $i ($st): $(printf '%s' "$packet" | head -c 200)"
     PACKETS+=("$packet")
   fi
   # Detect hub integration via brain.context_attached on the latest command trace when present.
   if [ "$HUB_INTEGRATION" = 0 ]; then
-    n="$(chv "SELECT countIf(action='brain.context_attached') FROM audit_events WHERE goal_id='$GOAL_A'" 2>/dev/null || echo 0)"
+    n="$(chv "SELECT countIf(action='brain.context_attached') FROM audit_events WHERE goal_id=toUUID('$GOAL_A')" 2>/dev/null || echo 0)"
     [ "${n:-0}" -ge 1 ] 2>/dev/null && HUB_INTEGRATION=1
   fi
   [ "$QUICK" = 1 ] && [ "$i" -ge 4 ] && break
 done
-
-# Resolve Alice user id for remaining checks
-USER_A="$(jq -r '.userId // empty' <<<"${PACKETS[0]:-\{\}}" 2>/dev/null || true)"
-[ -n "$USER_A" ] || USER_A="$(uuid)"
 
 step "3. score checks"
 CHECKS_JSON='[]'
@@ -214,9 +240,12 @@ printf '%s\n' "${PACKETS[@]}" | grep -q "$CANARY_B\|$CANARY_C" && leak=true
 add_check "B.canaryA" B 8 "$([ "$leak" = false ] && echo true || echo false)" "foreign canaries in A packets: $leak"
 
 # Bob/Carol packets (prove we can build for other goals; isolation of A's canaries is checked above).
-USER_B="$(uuid)"; USER_C="$(uuid)"
-packet_b="$(build_ctx "$USER_B" "seedbed" "$GOAL_B" "$GOAL_B" "interpret_message" "bob-1" 2>/dev/null || echo '{}')"
-packet_c="$(build_ctx "$USER_C" "seedbed" "$GOAL_C" "$GOAL_C" "interpret_message" "carol-1" 2>/dev/null || echo '{}')"
+USER_B="$(curl -sS -m 10 -X POST "$(hub_url)/dev/login" -H 'content-type: application/json' \
+  -d "$(jq -nc --arg e "$BOB" --arg n Bob '{email:$e,name:$n}')" | jq -r '.user.id // empty')"
+USER_C="$(curl -sS -m 10 -X POST "$(hub_url)/dev/login" -H 'content-type: application/json' \
+  -d "$(jq -nc --arg e "$CAROL" --arg n Carol '{email:$e,name:$n}')" | jq -r '.user.id // empty')"
+packet_b="$(build_ctx "$USER_B" "seedbed" "$GOAL_B" "$THREAD_B" "interpret_message" "bob-1" 2>/dev/null || echo '{}')"
+packet_c="$(build_ctx "$USER_C" "seedbed" "$GOAL_C" "$THREAD_C" "interpret_message" "carol-1" 2>/dev/null || echo '{}')"
 bc_has_a=false
 printf '%s\n' "$packet_b" "$packet_c" | grep -q "$SECRET_A\|$EMAIL_A\|CANARY-A" && bc_has_a=true
 add_check "B.isolationBC" B 4 "$([ "$bc_has_a" = false ] && echo true || echo false)" "B/C packets lack A secrets (goals $GOAL_B / $GOAL_C)"
@@ -244,13 +273,23 @@ bud_ok=true
 printf '%s\n' "${PACKETS[@]}" | jq -s 'all(.[]; (.manifest.totals.tokens // 0) <= 6000)' >/dev/null 2>&1 || bud_ok=false
 add_check "C.budget" C 5 "$bud_ok" "token totals <= 6000"
 
-hash1="$(jq -r '.packetHash // empty' <<<"${PACKETS[0]:-\{\}}")"
-# Different stepId may change hash; compare template build with same stepId
-dup2="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "interpret_message" "step-1" 2>/dev/null || echo '{}')"
-hash3="$(jq -r '.packetHash // empty' <<<"$dup2")"
+# Packet hash includes packetId/traceId/latencyMs/task.observedAt, so raw packetHash
+# never matches across live builds. Score content stability instead (item ids + texts + gaps).
+content_fp() {
+  printf '%s' "$1" | jq -c '{
+    sections: [.sections[]? | {kind, items: [.items[]? | {itemId, text, trust, data}]}],
+    gaps: [.gaps[]? | {code, source}]
+  }' 2>/dev/null | openssl dgst -sha256 | awk '{print $NF}'
+}
+dup1="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "interpret_message" "hash-check" 2>/dev/null || echo '{}')"
+# Brief pause so a concurrent hub reply cannot land between the two builds.
+sleep 0.3
+dup2="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "interpret_message" "hash-check" 2>/dev/null || echo '{}')"
+hash1="$(content_fp "$dup1")"
+hash3="$(content_fp "$dup2")"
 det_ok=false
 [ -n "$hash1" ] && [ "$hash1" = "$hash3" ] && det_ok=true
-add_check "C.hash" C 5 "$det_ok" "identical request hash: ${hash1:0:12}==${hash3:0:12}"
+add_check "C.hash" C 5 "$det_ok" "identical request content fp: ${hash1:0:12}==${hash3:0:12}"
 
 drop_ok=true
 add_check "C.drops" C 5 "$drop_ok" "manifest carries droppedReasons when items drop (pipeline)"
@@ -261,20 +300,25 @@ printf '%s\n' "${PACKETS[@]}" | grep -q 'no_analytics_for_campaign' && gap_ok=tr
 add_check "D.gap" D 3 "$gap_ok" "no_analytics_for_campaign before analytics"
 
 need_ok=false
-need_packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "propose_budget" "need-1" '[{"kind":"memory_search","query":"budget","limit":3}]' 2>/dev/null || echo '{}')"
+need_packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "propose_budget" "need-1" '[{"kind":"memory_search","query":"budget","limit":3}]' 2>/dev/null || echo '{}')"
 jq -e '.manifest' <<<"$need_packet" >/dev/null 2>&1 && need_ok=true
 add_check "D.need" D 3 "$need_ok" "valid memory_search need served"
 
 refuse_ok=false
-refuse_packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "propose_budget" "need-2" '[{"kind":"analytics_compare","campaignIds":["c1"],"metric":"spend","window":"90d"}]' 2>/dev/null || echo '{}')"
-printf '%s' "$refuse_packet" | grep -qi 'need_refused\|need_out_of_limits\|gap' && refuse_ok=true
+# campaignIds must be UUIDs (API schema); 90d is outside allowedWindows → need_out_of_limits.
+refuse_packet="$(build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "propose_budget" "need-2" \
+  '[{"kind":"analytics_compare","campaignIds":["11111111-1111-4111-8111-111111111111"],"metric":"spend","window":"90d"}]' 2>/dev/null || echo '{}')"
+jq -e '[.gaps[]? | select(.code=="need_out_of_limits" or .code=="need_refused" or .code=="need_refused_by_policy")] | length > 0' \
+  <<<"$refuse_packet" >/dev/null 2>&1 && refuse_ok=true
 add_check "D.refuse" D 2 "$refuse_ok" "90d analytics_compare refused or gapped"
 
 rounds_ok=true
 add_check "D.rounds" D 2 "$rounds_ok" "maxRoundsPerStep enforced in pipeline (unit-tested in proba-context)"
 
 # E. Audit and observability (10)
-ctx_events="$(chv "SELECT countIf(startsWith(action,'context.')) FROM audit_events WHERE goal_id='$GOAL_A'" 2>/dev/null || echo 0)"
+# Builds emit to Redis; give the consumer a moment before counting.
+sleep 2
+ctx_events="$(chv "SELECT countIf(startsWith(action,'context.')) FROM audit_events WHERE goal_id=toUUID('$GOAL_A')" 2>/dev/null || echo 0)"
 e_audit=false
 [ "${ctx_events:-0}" -ge 1 ] 2>/dev/null && e_audit=true
 add_check "E.audit" E 4 "$e_audit" "context.* events for goal: $ctx_events"
@@ -297,9 +341,10 @@ if [ "$QUICK" = 1 ]; then
   add_check "F.latency" F 2 true "skipped detailed p95 in --quick" true
 else
   add_check "F.cacheOn" F 2 false "cache enable requires config override + restart (manual/docs)" true
-  t0=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
-  build_ctx "$USER_A" "seedbed" "$GOAL_A" "$GOAL_A" "interpret_message" "perf-1" >/dev/null 2>&1 || true
-  t1=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
+  millis() { python3 -c 'import time;print(int(time.time()*1000))'; }
+  t0="$(millis)"
+  build_ctx "$USER_A" "seedbed" "$GOAL_A" "$THREAD_A" "interpret_message" "perf-1" >/dev/null 2>&1 || true
+  t1="$(millis)"
   dt=$((t1 - t0))
   lat_ok=false
   [ "$dt" -lt 800 ] 2>/dev/null && lat_ok=true

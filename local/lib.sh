@@ -216,7 +216,12 @@ CONTEXT_POSTGRES_PASSWORD="
       fi
       continue
     fi
-    if ! grep -Eq "^${key}=.+" "$f"; then
+    # Always force context-reader enable flags on for --context; other keys only fill when empty.
+    local force=0
+    case "$key" in
+      HUB_CONTEXT_READER_ENABLED|AUDIT_API_CONTEXT_READER_ENABLED|MEMORY_API_CONTEXT_READER_ENABLED) force=1 ;;
+    esac
+    if [ "$force" = 1 ] || ! grep -Eq "^${key}=.+" "$f"; then
       if grep -Eq "^${key}=" "$f"; then
         awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k {print k "=" v; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
       else
