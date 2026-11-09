@@ -54,18 +54,20 @@ require_label_filter() {
   esac
 }
 
-# Wait until pg_isready succeeds inside a container we started. On timeout, dump logs.
+# Wait until the named database exists and accepts SQL. pg_isready is not enough:
+# PQping returns 0 while the official image is still creating POSTGRES_DB, and
+# the next psql then exits 2 (FATAL: database "…" does not exist).
 wait_pg() {
   local name="$1" user="$2" db="$3" tries="${4:-60}" n=0
   while [ "$n" -lt "$tries" ]; do
     n=$((n + 1))
-    if docker exec "$name" pg_isready -U "$user" -d "$db" >/dev/null 2>&1; then
+    if docker exec "$name" psql -U "$user" -d "$db" -Atqc 'SELECT 1' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
   docker logs "$name" >&2 || true
-  die "postgres $name did not become ready"
+  die "postgres $name database $db did not become ready"
 }
 
 stack_files() {
