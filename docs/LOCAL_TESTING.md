@@ -254,8 +254,11 @@ credentials, exchanges the code, stores the refresh token encrypted per workspac
 Audit events record connect, account choice, disconnect and refresh failures (never token values), and every campaign action and metrics
 pull records the connection id, the ad account, who connected it and who approved the action (or `policy`).
 
-1. Create a Reddit app at https://www.reddit.com/prefs/apps of type **web app** with redirect URI exactly
-   `http://localhost:5180/marketing/reddit/callback` (change the port only if you changed `WEB_HOST_PORT`).
+1. Create the app in **Reddit Ads Manager > Business > Developer Portal (Developer Applications)**, as an admin of the business that
+   owns the ad account (or migrate an existing reddit.com app there). An app made only at reddit.com/prefs/apps signs you in but the
+   Ads API refuses it, and Marketing then shows "Could not list your ad accounts (HTTP 401/403 ...)". Register the redirect URI exactly
+   `http://localhost:5180/marketing/reddit/callback` (change the port only if you changed `WEB_HOST_PORT`). Your Reddit login must be a
+   member of that business with access to the ad account; accounts merely shared with the business are not listed.
 2. Put its client id in `local/keys/reddit_client_id` and its secret in `local/keys/reddit_client_secret` (one line each, `chmod 600`;
    gitignored). Never put them in `local/.env`.
 3. `./up.sh --agents` (any profile works for the login itself). `up.sh` generates `local/keys/hub-connections.key` (token encryption) and
@@ -265,6 +268,8 @@ pull records the connection id, the ad account, who connected it and who approve
 
 Without the two files Marketing shows Reddit as "not set up on this Hub". Status `Reconnect needed` means Reddit refused the refresh token;
 Ads then sends nothing to Reddit until you reconnect. Managing ad accounts you do not own may need Reddit's approval.
+If Connect fails, the message names the step, HTTP status, Ads API path and Reddit error code; the same fields (never tokens) are in
+the Hub log and in the audit trail (`auth.denied`, `details.kind = platform_connection`, `details.provider_error`).
 * **Status.** `./status.sh` reports ads-postgres, ads and gateway (and llm) when they exist.
 
 ## Raw text of events
