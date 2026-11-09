@@ -53,6 +53,9 @@ if [ "$CONTEXT" = 1 ]; then
   load_env
 fi
 
+step "platform connection keys"
+ensure_connection_keys
+
 step "build and start (project $PROJECT)"
 PROFILES=""
 if [ "$PORTAL" = 1 ]; then

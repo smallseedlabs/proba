@@ -226,6 +226,15 @@ services:
       ANALYTICS_SCHEDULE_ENABLED: ${ANALYTICS_SCHEDULE_ENABLED:-false}
       ANALYTICS_REVIEW_CADENCE_MS: ${ANALYTICS_REVIEW_CADENCE_MS:-21600000}
       ANALYTICS_SCHEDULER_TICK_MS: ${ANALYTICS_SCHEDULER_TICK_MS:-300000}
+      # Ad platform connections (web Marketing section). up.sh generates the key and the Ads broker key pair in
+      # local/keys/ and sets the Reddit client id/secret FILE paths only when local/keys/reddit_client_id and
+      # reddit_client_secret exist (the
+      # secret path is always set; the Hub reads it only when the client id path is set). Register exactly the redirect URI below on the Reddit app (type "web app").
+      HUB_CONNECTIONS_KEY_FILE: /run/proba/keys/hub-connections.key
+      HUB_ADS_SERVICE_PUBLIC_KEY_FILE: /run/proba/keys/ads-service.public.jwks.json
+      HUB_REDDIT_CLIENT_ID_FILE: ${HUB_REDDIT_CLIENT_ID_FILE:-}
+      HUB_REDDIT_CLIENT_SECRET_FILE: ${HUB_REDDIT_CLIENT_SECRET_FILE:?run ./up.sh (it fills local/.env)}
+      HUB_REDDIT_REDIRECT_URI: http://localhost:${WEB_HOST_PORT:-5180}/marketing/reddit/callback
     volumes:
       - ./keys:/run/proba/keys:ro
     ports:
@@ -642,8 +651,15 @@ services:
       ADS_RESEARCH_ACCEPTANCE_MODE: ${ADS_RESEARCH_ACCEPTANCE_MODE:-closed}
       ADS_MAX_DAILY_BUDGET: ${ADS_MAX_DAILY_BUDGET:-}
       ADS_MAX_DAILY_BUDGET_CURRENCY: ${ADS_MAX_DAILY_BUDGET_CURRENCY:-}
-      # Reddit adapter: OFF unless you set REDDIT_ADS_ENABLED=true. The token is a FILE under local/keys/ (gitignored).
+      # Reddit adapter: OFF unless you set REDDIT_ADS_ENABLED=true. Tokens come from the Hub connection broker
+      # (the account connected in the web Marketing section). REDDIT_TOKEN_SOURCE=file is the debugging fallback
+      # (REDDIT_AD_ACCOUNT_ID + a token FILE under local/keys/); broker mode refuses those two settings.
       REDDIT_ADS_ENABLED: ${REDDIT_ADS_ENABLED:-false}
+      REDDIT_TOKEN_SOURCE: ${REDDIT_TOKEN_SOURCE:-broker}
+      CONNECTION_BROKER_URL: http://hub:3000
+      CONNECTION_BROKER_ALLOWED_HOSTS: hub:3000
+      ADS_SERVICE_PRIVATE_KEY_FILE: ${ADS_SERVICE_PRIVATE_KEY_FILE:?run ./up.sh --agents (it fills local/.env)}
+      ADS_SERVICE_KEY_ID: ads-svc-1
       REDDIT_AD_ACCOUNT_ID: ${REDDIT_AD_ACCOUNT_ID:-}
       REDDIT_ACCESS_TOKEN_FILE: ${REDDIT_ACCESS_TOKEN_FILE:-}
       REDDIT_CONVERSION_PIXEL_ID: ${REDDIT_CONVERSION_PIXEL_ID:-}
