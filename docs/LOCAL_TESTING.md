@@ -239,11 +239,32 @@ Postgres on 55437) from `origin/main` snapshots, and points the Hub at the gatew
 * **Production guards apply.** gateway, ads and llm run `NODE_ENV=production`: Redis audit publisher, host allow-lists, no test fakes.
 * **Live model (`--llm`, PAID).** Put the DeepSeek key in `local/keys/llm_api_key` (one line, `chmod 600`) and set the
   `PRICE_*_USD_PER_MILLION` values in `local/.env` so the gateway cost cap (`GATEWAY_MAX_COST_USD`) can be enforced. Then `./up.sh ... --llm`.
-* **Live Reddit (SPENDS MONEY).** Needs, in `local/.env`: `REDDIT_ADS_ENABLED=true`, `REDDIT_AD_ACCOUNT_ID`,
-  `REDDIT_ACCESS_TOKEN_FILE=/run/proba/keys/<file>` (token file under `local/keys/`), `REDDIT_CONVERSION_PIXEL_ID`,
-  `ADS_RESEARCH_ACCEPTANCE_MODE=gateway_attested`, and a spend cap (`ADS_MAX_DAILY_BUDGET` + `ADS_MAX_DAILY_BUDGET_CURRENCY`); a funded
-  Reddit ad account; and a `ready` row in `ads.provider_accounts` for the workspace. Note: ad-domain creates Reddit campaigns, ad groups and
-  ads as `ACTIVE`, so an approved create can start spending at once.
+* **Live Reddit (SPENDS MONEY).** Connect Reddit in the web **Marketing** section first (below). Then, in `local/.env`:
+  `REDDIT_ADS_ENABLED=true`, `REDDIT_TOKEN_SOURCE=broker` (default), `REDDIT_CONVERSION_PIXEL_ID`,
+  `ADS_RESEARCH_ACCEPTANCE_MODE=gateway_attested`, and a spend cap (`ADS_MAX_DAILY_BUDGET` + `ADS_MAX_DAILY_BUDGET_CURRENCY`); and a funded
+  Reddit ad account. Ads maps the connected account (`ads.provider_accounts`) itself before each action. Note: ad-domain creates Reddit
+  campaigns, ad groups and ads as `ACTIVE`, so an approved create can start spending at once. Debugging fallback without the Marketing
+  login: `REDDIT_TOKEN_SOURCE=file` with `REDDIT_AD_ACCOUNT_ID` and `REDDIT_ACCESS_TOKEN_FILE=/run/proba/keys/<file>`.
+
+## Marketing (ad platform connections)
+
+The web app's **Marketing** section signs you in to an ad platform as yourself; only Reddit is enabled. The Hub holds the Proba Reddit app
+credentials, exchanges the code, stores the refresh token encrypted per workspace, and hands Ads short-lived access tokens on request
+(service-signed, `iss proba-ads`, `aud proba-hub`). The client secret and refresh tokens never reach Ads, the gateway or the browser.
+Audit events record connect, account choice, disconnect and refresh failures (never token values), and every campaign action and metrics
+pull records the connection id, the ad account, who connected it and who approved the action (or `policy`).
+
+1. Create a Reddit app at https://www.reddit.com/prefs/apps of type **web app** with redirect URI exactly
+   `http://localhost:5180/marketing/reddit/callback` (change the port only if you changed `WEB_HOST_PORT`).
+2. Put its client id in `local/keys/reddit_client_id` and its secret in `local/keys/reddit_client_secret` (one line each, `chmod 600`;
+   gitignored). Never put them in `local/.env`.
+3. `./up.sh --agents` (any profile works for the login itself). `up.sh` generates `local/keys/hub-connections.key` (token encryption) and
+   the `ads-service` Ed25519 pair (kid `ads-svc-1`) once, and points the Hub at the two Reddit files when both exist.
+4. Sign in to http://localhost:5180, open **Marketing**, click **Connect Reddit**, approve on Reddit (scopes `adsread`, `adsedit`,
+   permanent). Back in Marketing, pick the ad account if you have more than one. **Disconnect** revokes the grant on Reddit and deletes it.
+
+Without the two files Marketing shows Reddit as "not set up on this Hub". Status `Reconnect needed` means Reddit refused the refresh token;
+Ads then sends nothing to Reddit until you reconnect. Managing ad accounts you do not own may need Reddit's approval.
 * **Status.** `./status.sh` reports ads-postgres, ads and gateway (and llm) when they exist.
 
 ## Raw text of events

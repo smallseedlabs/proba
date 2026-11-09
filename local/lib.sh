@@ -69,6 +69,8 @@ ensure_env() {
              CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem \
              HUB_GATEWAY_PRIVATE_KEY_FILE=/run/proba/keys/hub-gateway-service.private.pem \
              GATEWAY_LLM_PRIVATE_KEY_FILE=/run/proba/keys/gateway-llm.private.pem \
+             ADS_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/ads-service.private.pem \
+             HUB_REDDIT_CLIENT_SECRET_FILE=/run/proba/keys/reddit_client_secret \
              LLM_API_KEY_FILE=/run/proba/keys/llm_api_key; do
     local dkey="${def%%=*}" dval="${def#*=}"
     # Fill missing or empty lines (local/.env.example ships empty key-file paths for the bridge).
@@ -197,6 +199,27 @@ resolve_sources() {
   esac
   [ -f "$AUDIT_SRC/Dockerfile" ] || die "no Dockerfile in $AUDIT_SRC"
   export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC GATEWAY_SRC ADS_SRC LLM_SRC
+}
+
+# Ad platform connections (Marketing section): generate the Hub's token-encryption key and the
+# Ads -> Hub broker key pair once. If the owner has put the Proba Reddit app credentials in
+# local/keys/reddit_client_id and local/keys/reddit_client_secret, point the Hub at them
+# (presence check only; the files are never read here).
+ensure_connection_keys() {
+  local keys="$LOCAL_DIR/keys"
+  mkdir -p "$keys"
+  chmod 700 "$keys" 2>/dev/null || true
+  need node
+  node "$LOCAL_DIR/tools/generate-connection-keys.mjs" "$keys" >/dev/null || die "failed to generate the platform connection keys"
+  if [ -s "$keys/reddit_client_id" ] && [ -s "$keys/reddit_client_secret" ]; then
+    chmod 600 "$keys/reddit_client_id" "$keys/reddit_client_secret" 2>/dev/null || true
+    # The secret's path is always set (local/.env); the Hub reads it only when the client id path is set too.
+    export HUB_REDDIT_CLIENT_ID_FILE=/run/proba/keys/reddit_client_id
+    info "Reddit app credentials found in local/keys: Connect Reddit is available in Marketing"
+  else
+    unset HUB_REDDIT_CLIENT_ID_FILE
+    info "no local/keys/reddit_client_id + reddit_client_secret: Marketing lists Reddit as not set up (see docs/LOCAL_TESTING.md, Marketing)"
+  fi
 }
 
 # Generate Ed25519 pairs into local/keys/ (once) and write container paths into local/.env.
