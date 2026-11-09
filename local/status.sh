@@ -63,4 +63,11 @@ if docker inspect "${PROJECT}-context-api" >/dev/null 2>&1; then
   check_job context-migrate
   check_service context-api "http://127.0.0.1:${CONTEXT_API_HOST_PORT}/health"
 fi
+# The agents profile (gateway, ads) and the llm profile: reported only when their containers exist.
+if docker inspect "${PROJECT}-gateway" >/dev/null 2>&1; then
+  check_service ads-postgres
+  check_service ads "http://127.0.0.1:${ADS_HOST_PORT}/health"
+  check_service gateway "http://127.0.0.1:${GATEWAY_HOST_PORT}/health"
+fi
+if docker inspect "${PROJECT}-llm" >/dev/null 2>&1; then check_service llm "http://127.0.0.1:${LLM_HOST_PORT}/health"; fi
 exit "$bad"
