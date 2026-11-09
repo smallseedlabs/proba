@@ -1,0 +1,184 @@
+{
+  "$comment": "Actual HTTP probes copied from sibling mains on 2026-11-08. Do not add paths that the processes do not register. Swarm healthchecks in this repo use /health except llm and gateway, whose sibling stacks probe /ready.",
+  "inspectedAt": "2026-11-08",
+  "services": {
+    "hub": {
+      "repo": "smallseedlabs/proba-hub",
+      "sha": "b98f2c40c63d42d90205f01f2ab8b8311bf15a61",
+      "port": 3000,
+      "health": { "method": "GET", "path": "/health", "auth": false, "body": { "status": "ok" } },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["Postgres SELECT 1"],
+        "doesNotCheck": ["Redis"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/health",
+      "source": "src/server.ts"
+    },
+    "web": {
+      "repo": "smallseedlabs/proba-web",
+      "sha": "573bb9904d3437f901678f38900c83c095a7f1f7",
+      "port": 8080,
+      "health": { "method": "GET", "path": "/health", "auth": false, "body": "healthy\\n", "via": "nginx" },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "docker/nginx.conf"
+    },
+    "portal": {
+      "repo": "smallseedlabs/proba-portal",
+      "sha": "a8e3f55867b8290804aa627f8c02244c44886f00",
+      "port": 8080,
+      "health": { "method": "GET", "path": "/health", "auth": false, "body": "healthy\\n", "via": "nginx" },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "docker/nginx.conf"
+    },
+    "audit-api": {
+      "repo": "smallseedlabs/proba-audit",
+      "sha": "15b49bbb54b7722c8655ce5c6858dca50748fc5b",
+      "port": 3100,
+      "health": { "method": "GET", "path": "/health", "auth": false },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["auditStore ClickHouse ping", "metricsStore ClickHouse ping", "eventBus Redis ping", "auditContentStore ping if AUDIT_CONTENT_ENABLED"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/health",
+      "source": "apps/audit-api/src/server.ts"
+    },
+    "audit-consumer": {
+      "repo": "smallseedlabs/proba-audit",
+      "sha": "15b49bbb54b7722c8655ce5c6858dca50748fc5b",
+      "port": 3101,
+      "health": { "method": "GET", "path": "/health", "auth": false, "stoppingStatus": 503 },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "packages/core/src/runtime/run-service.ts"
+    },
+    "metrics-ingester": {
+      "repo": "smallseedlabs/proba-audit",
+      "sha": "15b49bbb54b7722c8655ce5c6858dca50748fc5b",
+      "port": 3102,
+      "health": { "method": "GET", "path": "/health", "auth": false, "stoppingStatus": 503 },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "packages/core/src/runtime/run-service.ts"
+    },
+    "rollup": {
+      "repo": "smallseedlabs/proba-audit",
+      "sha": "15b49bbb54b7722c8655ce5c6858dca50748fc5b",
+      "port": 3103,
+      "health": { "method": "GET", "path": "/health", "auth": false, "stoppingStatus": 503 },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "packages/core/src/runtime/run-service.ts"
+    },
+    "memory-api": {
+      "repo": "smallseedlabs/proba-memory",
+      "sha": "e9d50b4a35e7fa3bff1e6661e9c6810c76313bc8",
+      "port": 3200,
+      "health": { "method": "GET", "path": "/health", "auth": false },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["memoryStore ping", "eventBus Redis ping", "jobRuns ping"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/health",
+      "source": "apps/memory-api/src/server.ts"
+    },
+    "memory-ingestor": {
+      "repo": "smallseedlabs/proba-memory",
+      "sha": "e9d50b4a35e7fa3bff1e6661e9c6810c76313bc8",
+      "port": 3201,
+      "health": { "method": "GET", "path": "/health", "auth": false, "stoppingStatus": 503 },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "packages/core/src/runtime/run-service.ts"
+    },
+    "memory-jobs": {
+      "repo": "smallseedlabs/proba-memory",
+      "sha": "e9d50b4a35e7fa3bff1e6661e9c6810c76313bc8",
+      "port": 3202,
+      "health": { "method": "GET", "path": "/health", "auth": false, "stoppingStatus": 503 },
+      "ready": null,
+      "swarmHealthcheck": "/health",
+      "source": "packages/core/src/runtime/run-service.ts"
+    },
+    "context": {
+      "repo": "smallseedlabs/proba-context",
+      "sha": "7f04e403d76467f01f8bc3b4af9993208db5e37d",
+      "port": 3500,
+      "health": { "method": "GET", "path": "/health", "auth": false },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "rateLimited": true,
+        "checks": ["config.version", "cache.ping", "packetStore.ping"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/health",
+      "source": "apps/context-api/src/app.ts"
+    },
+    "llm": {
+      "repo": "smallseedlabs/proba-llm",
+      "sha": "e486bf7090c552766b19b595c0a3c59e93b7887c",
+      "port": 3600,
+      "health": { "method": "GET", "path": "/health", "auth": false },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["config", "provider.ping (allowlist only, no paid HTTP)", "audit Redis ping", "outbox relayPending"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/ready",
+      "source": "src/http/app.ts and deploy/stack.yml"
+    },
+    "gateway": {
+      "repo": "smallseedlabs/proba-llm-gateway",
+      "sha": "b66ae7d9223fd31219402722ba5f1cc5c0dd4391",
+      "port": 3700,
+      "health": { "method": "GET", "path": "/health", "auth": false },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["config", "audit Redis ping (log publisher fails in production)", "GET {LLM_BASE_URL}/ready"],
+        "doesNotCheck": ["Context", "Ads", "research store", "analytics store"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/ready",
+      "source": "src/http/app.ts and deploy/stack.yml"
+    },
+    "ads": {
+      "repo": "smallseedlabs/ad-domain",
+      "sha": "2fbdcff2f636ff802d3e1e75b2c9f4cbd8640106",
+      "port": 3800,
+      "health": { "method": "GET", "path": "/health", "auth": false, "doesNotCheck": ["provider billing"] },
+      "ready": {
+        "method": "GET",
+        "path": "/ready",
+        "auth": false,
+        "checks": ["Postgres SELECT 1", "Redis ping if AUDIT_PUBLISHER=redis"],
+        "doesNotCheck": ["Reddit funding instruments"],
+        "notReadyStatus": 503
+      },
+      "swarmHealthcheck": "/health",
+      "source": "src/http/app.ts"
+    }
+  },
+  "infra": {
+    "postgres": { "healthcheck": "pg_isready", "readyHttp": null },
+    "redis": { "healthcheck": "ACL redis-cli ping", "readyHttp": null },
+    "clickhouse": { "healthcheck": "HTTP GET /ping on 8123", "readyHttp": { "method": "GET", "path": "/ping", "port": 8123 } }
+  },
+  "absentOnAllInspectedMains": ["/live", "/livez", "/readyz", "/healthz"]
+}

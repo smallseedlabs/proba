@@ -1,0 +1,140 @@
+# Optional Ads domain (ad-domain@2fbdcff). Sibling compose starts Postgres+Redis only;
+# this stack adds the process itself, unconfigured (Reddit off). Not Hub → gateway → Ads E2E.
+# Do not `docker stack deploy` from an agent. Do not enable REDDIT_ADS_ENABLED here.
+#
+# landingPageUrl is a request argument only. There is no default destination URL and none
+# is smallseedlabs.com. Page creation and gVisor sandbox are not part of this stack.
+#
+# Isolated Postgres (schema ads). Do not point DATABASE_URL at Hub/Context/Memory databases.
+version: "3.8"
+
+services:
+  ads-postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: ads
+      POSTGRES_PASSWORD_FILE: /run/secrets/ads_postgres_password
+      POSTGRES_DB: ad_domain
+    volumes:
+      - ads_postgres_data:/var/lib/postgresql/data
+    networks:
+      - proba-network
+    secrets:
+      - ads_postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ads -d ad_domain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: postgres
+        proba.component: ads-postgres
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  ads:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/ad-domain:${VERSION:-latest}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3800"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CALLER_ISSUERS: ${ADS_CALLER_ISSUERS:-proba-gateway}
+      CALLER_SUBJECTS: ${ADS_CALLER_SUBJECTS:-gateway}
+      GATEWAY_SERVICE_PUBLIC_KEY_FILE: /run/secrets/gateway_jwks
+      DATABASE_URL_FILE: /run/secrets/ads_database_url
+      DATABASE_SCHEMA: ads
+      AUDIT_PUBLISHER: redis
+      AUDIT_STREAM: ${AUDIT_STREAM:-proba.audit.events}
+      REDIS_URL_FILE: /run/secrets/redis_url
+      AUDIT_CONTENT_ENABLED: "false"
+      AUDIT_CONTENT_MASK_PII: "true"
+    networks:
+      - proba-network
+    secrets:
+      - gateway_jwks
+      - ads_database_url
+      - redis_url
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3800)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      labels:
+        proba.component: ads
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+networks:
+  proba-network:
+    name: proba-network
+    external: true
+
+volumes:
+  ads_postgres_data:
+
+secrets:
+  ads_postgres_password:
+    external: true
+  ads_database_url:
+    external: true
+  gateway_jwks:
+    external: true
+  redis_url:
+    external: true

@@ -1,0 +1,245 @@
+# Data plane for the Proba platform overlay.
+# Do not `docker stack deploy` from an agent. Operator-only. rollout.sh is dry-run unless explicitly applied.
+#
+# Creates overlay `proba-network`. Later stacks mark it external.
+# No published ports: Swarm cannot bind a published port to loopback; data stores stay overlay-only.
+# Images: digest-pinned where a sibling repo already pins them. ClickHouse has no in-repo digest.
+#
+# Operator env (no defaults for secrets): POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD, ANCHOR_DB_PASSWORD
+# must match the Docker secrets of the same names. REDIS_PASSWORD is not interpolated here; Redis
+# reads /run/secrets/redis_password.
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: proba
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: proba_hub
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - proba-network
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proba -d proba_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: postgres
+        proba.component: hub-postgres
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
+    environment:
+      REDIS_USER: ${REDIS_USER:-proba}
+    # ACL from the secret file so the password is not on argv. default user off. AOF on:
+    # the audit stream proba.audit.events must survive a Redis restart. @dangerous is denied.
+    command:
+      - sh
+      - -c
+      - >-
+        umask 077 &&
+        printf 'user default off\nuser %s on >%s ~* &* +@all -@dangerous\n' "$$REDIS_USER" "$$(cat /run/secrets/redis_password)" > /tmp/users.acl &&
+        exec redis-server --aclfile /tmp/users.acl --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - proba-network
+    secrets:
+      - redis_password
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli --user \"$$REDIS_USER\" ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: redis
+        proba.component: redis
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_USER: proba
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: proba_audit
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - proba-network
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: clickhouse
+        proba.component: clickhouse
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+
+  # Dedicated Postgres for signed audit chain heads (proba-audit apps profile).
+  # Not the ClickHouse that holds events. Not the Hub database.
+  anchor-db:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: anchors
+      POSTGRES_PASSWORD_FILE: /run/secrets/anchor_db_password
+      POSTGRES_DB: proba_audit_anchors
+    volumes:
+      - anchor_data:/var/lib/postgresql/data
+    networks:
+      - proba-network
+    secrets:
+      - anchor_db_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anchors -d proba_audit_anchors"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: postgres
+        proba.component: anchor-db
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+networks:
+  proba-network:
+    driver: overlay
+    attachable: true
+    name: proba-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
+  anchor_data:
+
+secrets:
+  postgres_password:
+    external: true
+  redis_password:
+    external: true
+  anchor_db_password:
+    external: true

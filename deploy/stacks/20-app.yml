@@ -1,0 +1,326 @@
+# Hub, web, and context bridge. Hub production (proba-hub src/brain/context-bridge-guards.ts)
+# refuses to start without CONTEXT_BRIDGE_URL, so context is not optional in this stack.
+# Do not `docker stack deploy` from an agent. Operator-only.
+#
+# Hub main has no GATEWAY_URL / GATEWAY_ENABLED. BRAIN_PROVIDER is mock. This is not a
+# Hub → gateway → LLM → Ads path. Sibling Hub stack.yml on hub main is missing the
+# context-bridge requirement added later; this file follows current Hub process guards.
+#
+# Private PEM keys cannot use Docker secrets: Hub requires chmod 600 (not 0444). Bind-mount
+# ${PROBA_KEYS_DIR} files onto nodes labeled proba.keys=true.
+#
+# PUBLIC_HUB_URL is what the browser calls. It is not overlay DNS and has no default host
+# (including no smallseedlabs.com).
+version: "3.8"
+
+services:
+  hub-migrate:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-hub:${VERSION:-latest}
+    command: ["node", "dist/db/migrate-cli.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - proba-network
+    secrets:
+      - jwt_secret
+    deploy:
+      mode: replicated-job
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  hub:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-hub:${VERSION:-latest}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?set FIREBASE_PROJECT_ID}
+      CORS_ORIGIN: ${CORS_ORIGIN:?set CORS_ORIGIN}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      BRAIN_PROVIDER: mock
+      AUDIT_ENABLED: "true"
+      AUDIT_RELAY_ENABLED: "true"
+      AUDIT_WORKSPACE_ID: ${AUDIT_WORKSPACE_ID:-seedbed}
+      AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-false}
+      AUDIT_CONTENT_MASK_PII: "true"
+      CONTEXT_BRIDGE_URL: http://context:3500
+      CONTEXT_BRIDGE_ENABLED: "true"
+      HUB_ASSERTION_PRIVATE_KEY_FILE: /run/proba/keys/hub-assertion.private.pem
+      HUB_ASSERTION_PUBLIC_KEY_FILE: /run/secrets/hub_assertion_public_jwks
+      HUB_ASSERTION_KEY_ID: ${HUB_ASSERTION_KEY_ID:-hub-key-1}
+      CONTEXT_SERVICE_PUBLIC_KEY_FILE: /run/secrets/context_service_public_jwks
+      HUB_CONTEXT_READER_ENABLED: "true"
+    networks:
+      - proba-network
+    secrets:
+      - jwt_secret
+      - hub_assertion_public_jwks
+      - context_service_public_jwks
+    volumes:
+      - type: bind
+        source: ${PROBA_KEYS_DIR:?set PROBA_KEYS_DIR}/hub-assertion.private.pem
+        target: /run/proba/keys/hub-assertion.private.pem
+        read_only: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.labels.proba.keys == true
+      labels:
+        proba.component: hub
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  web:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-web:${VERSION:-latest}
+    environment:
+      API_BASE_URL: ${PUBLIC_HUB_URL:?set PUBLIC_HUB_URL}
+      AUDIT_API_BASE_URL: ${PUBLIC_AUDIT_API_URL:-}
+      FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?set FIREBASE_PROJECT_ID}
+      FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
+    networks:
+      - proba-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      replicas: 2
+      endpoint_mode: vip
+      labels:
+        proba.component: web
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  context-postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: proba
+      POSTGRES_PASSWORD_FILE: /run/secrets/context_postgres_password
+      POSTGRES_DB: proba_context
+    volumes:
+      - context_postgres_data:/var/lib/postgresql/data
+    networks:
+      - proba-network
+    secrets:
+      - context_postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proba -d proba_context"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        proba.backup.role: postgres
+        proba.component: context-postgres
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  context-migrate:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-context-migrate:${VERSION:-latest}
+    environment:
+      DATABASE_URL: postgresql://proba:${CONTEXT_POSTGRES_PASSWORD:?set CONTEXT_POSTGRES_PASSWORD}@context-postgres:5432/proba_context
+    networks:
+      - proba-network
+    deploy:
+      mode: replicated-job
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  context:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-context:${VERSION:-latest}
+    environment:
+      NODE_ENV: production
+      PORT: "3500"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CONTEXT_CONFIG_PATH: /app/config/context.config.yaml
+      CONTEXT_ALLOW_LOCAL_IDENTITY: "false"
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      DATABASE_URL: postgresql://proba:${CONTEXT_POSTGRES_PASSWORD:?set CONTEXT_POSTGRES_PASSWORD}@context-postgres:5432/proba_context
+      HUB_BASE_URL: http://hub:3000
+      MEMORY_API_BASE_URL: http://memory-api:3200
+      AUDIT_API_BASE_URL: http://audit-api:3100
+      HUB_ASSERTION_PUBLIC_KEY_FILE: /run/secrets/hub_assertion_public_jwks
+      CONTEXT_SERVICE_PRIVATE_KEY_FILE: /run/proba/keys/context-service.private.pem
+      CONTEXT_SERVICE_KEY_ID: ${CONTEXT_SERVICE_KEY_ID:-bridge-key-1}
+    networks:
+      - proba-network
+    secrets:
+      - hub_assertion_public_jwks
+    configs:
+      - source: context_production_yaml
+        target: /app/config/context.config.yaml
+        mode: 0444
+    volumes:
+      - type: bind
+        source: ${PROBA_KEYS_DIR:?set PROBA_KEYS_DIR}/context-service.private.pem
+        target: /run/proba/keys/context-service.private.pem
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:'+(process.env.PORT||3500)+'/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.labels.proba.keys == true
+      labels:
+        proba.component: context
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+networks:
+  proba-network:
+    name: proba-network
+    external: true
+
+volumes:
+  context_postgres_data:
+
+secrets:
+  jwt_secret:
+    external: true
+  hub_assertion_public_jwks:
+    external: true
+  context_service_public_jwks:
+    external: true
+  context_postgres_password:
+    external: true
+
+configs:
+  context_production_yaml:
+    file: ../config/context.production.yaml

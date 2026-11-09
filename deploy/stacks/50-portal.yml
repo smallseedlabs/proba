@@ -1,0 +1,54 @@
+# Proba Insights (optional). Nginx static UI. GET /health only; no /ready.
+# Browser calls the audit API at PUBLIC_AUDIT_API_URL (operator TLS URL, not overlay DNS).
+# Holds no password. Do not `docker stack deploy` from an agent.
+version: "3.8"
+
+services:
+  portal:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-portal:${VERSION:-latest}
+    environment:
+      API_BASE_URL: ${PUBLIC_AUDIT_API_URL:?set PUBLIC_AUDIT_API_URL}
+      MEMORY_URL: ${PUBLIC_MEMORY_API_URL:-}
+      FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?set FIREBASE_PROJECT_ID}
+      FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
+      LOG_LEVEL: ${PORTAL_LOG_LEVEL:-info}
+    networks:
+      - proba-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      replicas: 2
+      endpoint_mode: vip
+      labels:
+        proba.component: portal
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+networks:
+  proba-network:
+    name: proba-network
+    external: true
