@@ -54,6 +54,20 @@ require_label_filter() {
   esac
 }
 
+# Wait until pg_isready succeeds inside a container we started. On timeout, dump logs.
+wait_pg() {
+  local name="$1" user="$2" db="$3" tries="${4:-60}" n=0
+  while [ "$n" -lt "$tries" ]; do
+    n=$((n + 1))
+    if docker exec "$name" pg_isready -U "$user" -d "$db" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  docker logs "$name" >&2 || true
+  die "postgres $name did not become ready"
+}
+
 stack_files() {
   ls -1 "$STACK_DIR"/*.yml
 }

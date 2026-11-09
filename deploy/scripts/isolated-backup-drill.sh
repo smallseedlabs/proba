@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated Postgres backup→restore proof. Unique labels and a loopback port.
+# Isolated Postgres backup→restore proof. Unique labels, docker exec only (no host ports).
 # Never touches unlabeled volumes, never swarm init, never down -v / prune.
 # Skips (exit 0) when docker is missing unless --require-runtime.
 set -euo pipefail
@@ -61,8 +61,10 @@ cleanup() {
 
 trap cleanup EXIT
 
-info "isolated drill id=$ID (loopback publish, scoped labels, no swarm)"
+info "isolated drill id=$ID (no published ports, scoped labels, no swarm)"
 docker volume create --label "$LABEL" --label proba.isolated-drill=1 "$NAME-src-data" >/dev/null
+# No -p: CI's docker CLI treats 127.0.0.1::5432 as a usage error (exit 2), and
+# the drill only uses docker exec. Do not publish host ports.
 docker run -d \
   --name "$NAME-src" \
   --label "$LABEL" \
@@ -72,14 +74,9 @@ docker run -d \
   -e POSTGRES_PASSWORD="$PASSWORD" \
   -e POSTGRES_DB=proba_drill \
   -v "$NAME-src-data:/var/lib/postgresql/data" \
-  -p 127.0.0.1::5432 \
-  "$IMAGE" >/dev/null
+  "$IMAGE"
 
-for _ in $(seq 1 40); do
-  docker exec "$NAME-src" pg_isready -U proba -d proba_drill >/dev/null 2>&1 && break
-  sleep 1
-done
-docker exec "$NAME-src" pg_isready -U proba -d proba_drill >/dev/null
+wait_pg "$NAME-src" proba proba_drill 60
 docker exec -e PGPASSWORD="$PASSWORD" "$NAME-src" \
   psql -U proba -d proba_drill -c "CREATE TABLE drill (id int primary key, note text); INSERT INTO drill VALUES (1, '$MARKER');"
 

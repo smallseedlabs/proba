@@ -10,7 +10,7 @@
  *   5. probes an HTTP path the sibling process does not register
  *   6. omits restart/update/rollback/resource safeguards on long-running services
  *   7. names a Docker secret that is not external
- *   8. mentions smallseedlabs.com (no default campaign/API host)
+ *   8. sets a reserved campaign/API destination host (hostname parse, not substring)
  *
  * Warnings (non-zero only with --strict-images): image tags defaulting to `latest`,
  * unpinned ClickHouse/pgvector tags. Those are provenance gaps, not a security clearance.
@@ -37,7 +37,6 @@ function isSecretName(name) {
   return SECRET_PATTERN.test(name);
 }
 const REQUIRED = /\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}/;
-const DEFAULTED_SECRET = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:?[-+])/;
 const SECRET_FILE = /^\/run\/(secrets|proba\/keys)\//;
 
 const JOB_MODES = new Set(['replicated-job', 'global-job']);
@@ -111,6 +110,28 @@ function envMap(service) {
   return { ...env };
 }
 
+/** Apex host that must never be a default campaign/API destination. */
+const FORBIDDEN_CAMPAIGN_HOST = 'smallseedlabs.com';
+
+/**
+ * Hostname of a YAML string if it is a URL or bare host. Compose interpolations
+ * and non-URLs return ''. Comparison uses URL.hostname, not substring search.
+ */
+function hostnameOf(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw.includes('${')) return '';
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return new URL(candidate).hostname.replace(/\.$/, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isForbiddenCampaignHost(hostname) {
+  return hostname === FORBIDDEN_CAMPAIGN_HOST || hostname.endsWith(`.${FORBIDDEN_CAMPAIGN_HOST}`);
+}
+
 function flattenStrings(node, path = []) {
   const out = [];
   if (typeof node === 'string') out.push([path.join('.'), node, path[path.length - 1]]);
@@ -163,8 +184,8 @@ export function checkStackDoc(doc, opts = {}) {
   doc = expandMerge(doc);
 
   for (const [, value] of flattenStrings(doc)) {
-    if (String(value).toLowerCase().includes('smallseedlabs.com')) {
-      violations.push(prefix('sets smallseedlabs.com; campaign/API destinations have no default host'));
+    if (isForbiddenCampaignHost(hostnameOf(value))) {
+      violations.push(prefix('sets a reserved campaign/API destination host; destinations have no default host'));
     }
   }
   for (const absent of contracts.absentOnAllInspectedMains ?? []) {
@@ -187,13 +208,6 @@ export function checkStackDoc(doc, opts = {}) {
       if (v === '') continue;
       if (SECRET_FILE.test(v)) continue;
       if (REQUIRED.test(v) && v.startsWith('${') && v.endsWith('}')) continue;
-      // Allow Compose required-interpolation inside a URL (DATABASE_URL, REDIS_URL).
-      if (REQUIRED.test(v) && (v.includes('://') || v.includes('${'))) {
-        const masked = v.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}/g, 'X');
-        if (!DEFAULTED_SECRET.test(masked) && !/:[^@/\s]+@/.test(masked.replace(/X/g, 'X'))) {
-          // still check leftover defaulted secrets
-        }
-      }
       const defaulted = [...v.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)(:?[-+])[^}]*\}/g)];
       for (const m of defaulted) {
         if (SECRET_PATTERN.test(m[1])) {

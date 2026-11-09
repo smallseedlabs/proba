@@ -80,17 +80,27 @@ test('negative: invented /readyz probe is rejected', () => {
   assert.ok(violations.some((v) => v.includes('/readyz')));
 });
 
-test('negative: smallseedlabs.com default host is rejected', () => {
+test('negative: reserved campaign destination host is rejected', () => {
   const { file, text, doc } = clone('deploy/stacks/20-app.yml');
   doc.services.web.environment.API_BASE_URL = 'https://smallseedlabs.com/offer';
   const { violations } = checkStackDoc(doc, { file, text });
-  assert.ok(violations.some((v) => v.includes('smallseedlabs.com')));
+  assert.ok(violations.some((v) => v.includes('reserved campaign/API destination host')));
 });
 
-test('comments that forbid smallseedlabs.com are not violations', () => {
+test('query-string mention of the reserved host is not a destination', () => {
+  const { file, text, doc } = clone('deploy/stacks/20-app.yml');
+  doc.services.web.environment.API_BASE_URL = 'https://example.test/offer?ref=smallseedlabs.com';
+  const { violations } = checkStackDoc(doc, { file, text });
+  assert.equal(
+    violations.filter((v) => v.includes('reserved campaign/API destination host')).length,
+    0
+  );
+});
+
+test('comments that forbid the reserved host are not violations', () => {
   const { violations } = checkStackDir(join(ROOT, 'deploy/stacks'));
   assert.equal(
-    violations.filter((v) => v.includes('smallseedlabs.com')).length,
+    violations.filter((v) => v.includes('reserved campaign/API destination host')).length,
     0
   );
 });

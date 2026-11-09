@@ -48,7 +48,7 @@ The isolated proof used in CI / this workspace:
 ./deploy/scripts/isolated-backup-drill.sh
 ```
 
-That starts a uniquely labeled Postgres on `127.0.0.1` with a random host port, writes a marker row, dumps, restores into a second labeled container, checks the marker, and deletes **only** those labeled containers. It will not match `proba-local_*` volumes.
+That starts a uniquely labeled Postgres **without publishing host ports** (the drill uses `docker exec` only; CI's docker CLI rejects `127.0.0.1::5432` as a usage error), writes a marker row, dumps, restores into a second labeled container, checks the marker, and deletes **only** those labeled containers. It will not match `proba-local_*` volumes. Pass `--host-port` to `restore.sh` only if you need a loopback mapping.
 
 ## Recovery notes
 
