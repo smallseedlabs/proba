@@ -47,6 +47,10 @@ All ports are bound to `127.0.0.1`. They are deliberately unusual so they do not
 | Postgres with pgvector (profile `memory`) | localhost:55434 | db `proba_memory`, user `proba`, password `MEMORY_POSTGRES_PASSWORD` in `local/.env` |
 | Context API (profile `context`) | http://localhost:3500 | `/health`, `/ready`, `/v1/context/...`; see "Context bridge" |
 | Postgres (profile `context`) | localhost:55435 | db `proba_context`, user `proba`, password `CONTEXT_POSTGRES_PASSWORD` in `local/.env` |
+| Gateway (profile `agents`) | http://localhost:3700 | `/health`; proba-llm-gateway, the Hub calls it at `http://gateway:3700`; see "Agents profile" |
+| Ads (profile `agents`) | http://localhost:3800 | `/health`; ad-domain, Reddit adapter off by default |
+| Postgres (profile `agents`) | localhost:55437 | db `ad_domain`, user `proba`, password `ADS_POSTGRES_PASSWORD` in `local/.env` |
+| LLM (profile `llm`) | http://localhost:3600 | `/health`; proba-llm, the only service that calls a paid model; only with `--llm` |
 
 The compose project is `proba-local` and every container is called `proba-local-*`, so it runs next to other stacks (for example a `proba-audit-*` development
 stack). Data is in the named volumes `proba-local_*_data`.
@@ -216,6 +220,31 @@ PROBA_SRC=worktree ./up.sh --portal --memory --context
   * `./verify-context.sh --quick` / `--step N` / `--keep` / `--trace ID`.
 * **Caching**: edit the bridge config `sources.memory.cache.enabled: true` and `ttlSeconds: 30` (in the proba-context checkout used to build the image), rebuild/restart context-api, re-run a build and read `/metrics` (`context_cache_hits_total`).
 * **Manifests**: admin `GET /v1/context/packets?goalId=` (Firebase allow-list when configured); each successful build stores the manifest in Postgres.
+
+## Agents profile (analytics and action bot)
+
+`./up.sh --agents` (implies `--context`) also builds and starts **proba-llm-gateway** (`gateway`, 3700) and **ad-domain** (`ads`, 3800, own
+Postgres on 55437) from `origin/main` snapshots, and points the Hub at the gateway (`GATEWAY_URL=http://gateway:3700`, for that run only).
+
+```bash
+./up.sh --portal --memory --context --agents
+```
+
+* **Safe by default.** `REDDIT_ADS_ENABLED=false` (ads answers `provider_unconfigured`, nothing reaches Reddit), `RESEARCH_HTTP_FETCH=false`,
+  `ADS_RESEARCH_ACCEPTANCE_MODE=closed`, `ANALYTICS_SCHEDULE_ENABLED=false`. No model is reachable: proba-llm is a separate `llm` profile
+  that `--agents` never starts, so every gateway model call fails closed.
+* **Keys.** `up.sh` generates two more Ed25519 pairs under `local/keys/` once: `hub-gateway-service` (Hub -> gateway, kid `hub-gw-1`) and
+  `gateway-llm` (kid `gateway-llm-1`). The gateway signs **both** its proba-llm tokens and its ads tokens with `gateway-llm` (audiences
+  `proba-llm` and `proba-ads`); llm and ads verify with the same public JWKS.
+* **Production guards apply.** gateway, ads and llm run `NODE_ENV=production`: Redis audit publisher, host allow-lists, no test fakes.
+* **Live model (`--llm`, PAID).** Put the DeepSeek key in `local/keys/llm_api_key` (one line, `chmod 600`) and set the
+  `PRICE_*_USD_PER_MILLION` values in `local/.env` so the gateway cost cap (`GATEWAY_MAX_COST_USD`) can be enforced. Then `./up.sh ... --llm`.
+* **Live Reddit (SPENDS MONEY).** Needs, in `local/.env`: `REDDIT_ADS_ENABLED=true`, `REDDIT_AD_ACCOUNT_ID`,
+  `REDDIT_ACCESS_TOKEN_FILE=/run/proba/keys/<file>` (token file under `local/keys/`), `REDDIT_CONVERSION_PIXEL_ID`,
+  `ADS_RESEARCH_ACCEPTANCE_MODE=gateway_attested`, and a spend cap (`ADS_MAX_DAILY_BUDGET` + `ADS_MAX_DAILY_BUDGET_CURRENCY`); a funded
+  Reddit ad account; and a `ready` row in `ads.provider_accounts` for the workspace. Note: ad-domain creates Reddit campaigns, ad groups and
+  ads as `ACTIVE`, so an approved create can start spending at once.
+* **Status.** `./status.sh` reports ads-postgres, ads and gateway (and llm) when they exist.
 
 ## Raw text of events
 

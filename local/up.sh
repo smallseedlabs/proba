@@ -3,20 +3,25 @@
 #   --portal      also start Proba Insights (proba-portal); needs the Firebase settings, see docs/LOCAL_TESTING.md
 #   --memory      also start the memory service (proba-memory: memory-api, ingestor, jobs, own Postgres); see docs/LOCAL_TESTING.md
 #   --context     also start the context bridge (proba-context: context-api, migrations, own Postgres); see docs/LOCAL_TESTING.md
+#   --agents      also start the analytics and action bot: gateway (proba-llm-gateway) and ads (ad-domain, own Postgres);
+#                 implies --context. Reddit stays off (REDDIT_ADS_ENABLED=false) and no model is reachable without --llm
+#   --llm         also start proba-llm, which calls the PAID DeepSeek API with the key in local/keys/llm_api_key; implies --agents
 #   --no-build    do not rebuild images (reuse proba-local/*:dev, or images you pulled via *_IMAGE)
 #   --no-wait     do not wait for the services to become healthy
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-PORTAL=0; MEMORY=0; CONTEXT=0; BUILD=1; WAIT=1
+PORTAL=0; MEMORY=0; CONTEXT=0; AGENTS=0; LLM=0; BUILD=1; WAIT=1
 for a in "$@"; do
   case "$a" in
     --portal) PORTAL=1 ;;
     --memory) MEMORY=1 ;;
     --context) CONTEXT=1 ;;
+    --agents) AGENTS=1; CONTEXT=1 ;;
+    --llm) LLM=1; AGENTS=1; CONTEXT=1 ;;
     --no-build) BUILD=0 ;;
     --no-wait) WAIT=0 ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) die "unknown option: $a" ;;
   esac
 done
@@ -26,12 +31,18 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running"
 ensure_env
 load_env
 step "sources"
-resolve_sources "$PORTAL" "$MEMORY" "$CONTEXT"
+if [ "$LLM" = 1 ]; then
+  [ -s "$LOCAL_DIR/keys/llm_api_key" ] || die "--llm needs the provider key in local/keys/llm_api_key (one line, chmod 600; gitignored). It is never read from local/.env"
+  warn "--llm: proba-llm will make PAID DeepSeek calls whenever the gateway asks it to"
+fi
+resolve_sources "$PORTAL" "$MEMORY" "$CONTEXT" "$AGENTS" "$LLM"
 step "ports"
 EXTRA_PORTS=""
 [ "$PORTAL" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS PORTAL_HOST_PORT"
 [ "$MEMORY" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS MEMORY_POSTGRES_HOST_PORT MEMORY_API_HOST_PORT MEMORY_INGESTOR_HOST_PORT MEMORY_JOBS_HOST_PORT"
 [ "$CONTEXT" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS CONTEXT_POSTGRES_HOST_PORT CONTEXT_API_HOST_PORT"
+[ "$AGENTS" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS GATEWAY_HOST_PORT ADS_HOST_PORT ADS_POSTGRES_HOST_PORT"
+[ "$LLM" = 1 ] && EXTRA_PORTS="$EXTRA_PORTS LLM_HOST_PORT"
 # shellcheck disable=SC2086
 check_ports $EXTRA_PORTS
 info "all host ports are free (or already ours)"
@@ -55,6 +66,18 @@ fi
 if [ "$CONTEXT" = 1 ]; then
   if [ -f "$CONTEXT_SRC/Dockerfile" ]; then PROFILES="${PROFILES:+$PROFILES,}context"
   else warn "proba-context has no Dockerfile in $CONTEXT_SRC (try PROBA_SRC=worktree or PROBA_REF): starting the platform without the context bridge"; CONTEXT=0; fi
+fi
+if [ "$AGENTS" = 1 ]; then
+  if [ "$CONTEXT" = 1 ] && [ -f "$GATEWAY_SRC/Dockerfile" ] && [ -f "$ADS_SRC/Dockerfile" ]; then
+    PROFILES="${PROFILES:+$PROFILES,}agents"
+    # For this run only: Hub talks to the gateway. A later ./up.sh without --agents puts the Hub back on its own brain.
+    export PROBA_GATEWAY_URL="http://gateway:3700"
+    [ "${REDDIT_ADS_ENABLED:-false}" = "true" ] && warn "REDDIT_ADS_ENABLED=true in local/.env: ads can create REAL Reddit campaigns (spend) once a run is approved"
+  else warn "the agents profile needs the context bridge and Dockerfiles in $GATEWAY_SRC and $ADS_SRC: starting without the gateway and ads"; AGENTS=0; LLM=0; fi
+fi
+if [ "$LLM" = 1 ]; then
+  if [ -f "$LLM_SRC/Dockerfile" ]; then PROFILES="${PROFILES:+$PROFILES,}llm"
+  else warn "proba-llm has no Dockerfile in $LLM_SRC: starting without the llm service"; LLM=0; fi
 fi
 [ -z "$PROFILES" ] || export COMPOSE_PROFILES="$PROFILES"
 if [ "$PORTAL" = 1 ]; then
@@ -88,6 +111,8 @@ PORTAL_LINE=""
 [ "$PORTAL" = 1 ] && PORTAL_LINE=$'\n'"  Proba Insights http://localhost:${PORTAL_HOST_PORT}   (health: /health)"
 [ "$MEMORY" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  Memory API     http://localhost:${MEMORY_API_HOST_PORT}   (/health, /v1/..., bearer token MEMORY_API_LOCAL_TOKEN in local/.env)"
 [ "$CONTEXT" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  Context API    http://localhost:${CONTEXT_API_HOST_PORT}   (/health, /ready, /v1/context/...)"
+[ "$AGENTS" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  Gateway        http://localhost:${GATEWAY_HOST_PORT}   (/health; Hub GATEWAY_URL=http://gateway:3700)"$'\n'"  Ads            http://localhost:${ADS_HOST_PORT}   (/health; Reddit adapter ${REDDIT_ADS_ENABLED:-false})"
+[ "$LLM" = 1 ] && PORTAL_LINE="$PORTAL_LINE"$'\n'"  LLM            http://localhost:${LLM_HOST_PORT}   (/health; PAID DeepSeek calls)"
 cat <<MSG
 
 Platform is up.

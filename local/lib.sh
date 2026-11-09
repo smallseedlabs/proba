@@ -31,7 +31,7 @@ need() {
 # ---------------------------------------------------------------- env file
 # Every secret of local/.env that ./up.sh generates (random hex, never overwritten). docker-compose.yml requires each of them
 # (`${NAME:?...}`): there is no default password anywhere.
-GENERATED_SECRETS="JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN ANCHOR_HMAC_KEY REDIS_PASSWORD CLICKHOUSE_CONSUMER_PASSWORD CLICKHOUSE_API_PASSWORD CLICKHOUSE_MIGRATOR_PASSWORD CONTEXT_POSTGRES_PASSWORD"
+GENERATED_SECRETS="JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LOCAL_TOKEN AUDIT_API_LOCAL_VIEWER_TOKEN MEMORY_POSTGRES_PASSWORD MEMORY_API_LOCAL_TOKEN MEMORY_API_LOCAL_VIEWER_TOKEN ANCHOR_HMAC_KEY REDIS_PASSWORD CLICKHOUSE_CONSUMER_PASSWORD CLICKHOUSE_API_PASSWORD CLICKHOUSE_MIGRATOR_PASSWORD CONTEXT_POSTGRES_PASSWORD ADS_POSTGRES_PASSWORD"
 
 # Create local/.env from the example on first run and fill the secrets with random,
 # local-only values. Existing values are never overwritten. Nothing is printed.
@@ -66,7 +66,10 @@ ensure_env() {
              CLICKHOUSE_CONSUMER_USER=proba_consumer CLICKHOUSE_API_USER=proba_api CLICKHOUSE_MIGRATOR_USER=proba_migrator \
              AUDIT_STREAM_MAX_AGE_HOURS=72 \
              HUB_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem \
-             CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem; do
+             CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem \
+             HUB_GATEWAY_PRIVATE_KEY_FILE=/run/proba/keys/hub-gateway-service.private.pem \
+             GATEWAY_LLM_PRIVATE_KEY_FILE=/run/proba/keys/gateway-llm.private.pem \
+             LLM_API_KEY_FILE=/run/proba/keys/llm_api_key; do
     local dkey="${def%%=*}" dval="${def#*=}"
     # Fill missing or empty lines (local/.env.example ships empty key-file paths for the bridge).
     if ! grep -Eq "^${dkey}=.+" "$f"; then
@@ -84,7 +87,7 @@ load_env() {
   [ -f "$LOCAL_DIR/.env" ] || die "local/.env is missing: run ./up.sh first"
   # Settings given on the command line (PROBA_SRC=worktree ./up.sh) win over local/.env.
   local keep="" v
-  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR PROBA_MEMORY_DIR PROBA_CONTEXT_DIR; do
+  for v in PROBA_SRC PROBA_REF PROBA_HUB_DIR PROBA_WEB_DIR PROBA_AUDIT_DIR PROBA_PORTAL_DIR PROBA_MEMORY_DIR PROBA_CONTEXT_DIR PROBA_GATEWAY_DIR PROBA_ADS_DIR PROBA_LLM_DIR; do
     if [ -n "${!v+x}" ]; then keep="$keep$v=$(printf '%q' "${!v}") "; fi
   done
   set -a
@@ -103,10 +106,12 @@ load_env() {
   : "${ROLLUP_HOST_PORT:=3403}" "${AUDIT_API_HOST_PORT:=3400}" "${PORTAL_HOST_PORT:=3410}"
   : "${MEMORY_POSTGRES_HOST_PORT:=55434}" "${MEMORY_API_HOST_PORT:=3420}" "${MEMORY_INGESTOR_HOST_PORT:=3421}" "${MEMORY_JOBS_HOST_PORT:=3422}"
   : "${CONTEXT_POSTGRES_HOST_PORT:=55435}" "${CONTEXT_API_HOST_PORT:=3500}"
+  : "${GATEWAY_HOST_PORT:=3700}" "${ADS_HOST_PORT:=3800}" "${ADS_POSTGRES_HOST_PORT:=55437}" "${LLM_HOST_PORT:=3600}"
   export WEB_HOST_PORT HUB_HOST_PORT POSTGRES_HOST_PORT REDIS_HOST_PORT CLICKHOUSE_HTTP_HOST_PORT
   export AUDIT_CONSUMER_HOST_PORT METRICS_INGESTER_HOST_PORT ROLLUP_HOST_PORT AUDIT_API_HOST_PORT PORTAL_HOST_PORT
   export MEMORY_POSTGRES_HOST_PORT MEMORY_API_HOST_PORT MEMORY_INGESTOR_HOST_PORT MEMORY_JOBS_HOST_PORT
   export CONTEXT_POSTGRES_HOST_PORT CONTEXT_API_HOST_PORT
+  export GATEWAY_HOST_PORT ADS_HOST_PORT ADS_POSTGRES_HOST_PORT LLM_HOST_PORT
 }
 
 # ---------------------------------------------------------------- compose
@@ -143,11 +148,18 @@ snapshot_repo() { # name dir
   fi
 }
 
-# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC (absolute build contexts).
-# resolve_sources [want_portal 0|1] [want_memory 0|1] [want_context 0|1]
+# Sets and exports HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC GATEWAY_SRC ADS_SRC LLM_SRC (absolute build contexts).
+# resolve_sources [want_portal 0|1] [want_memory 0|1] [want_context 0|1] [want_agents 0|1] [want_llm 0|1]
 resolve_sources() {
   local mode="${PROBA_SRC:-main}" want_portal="${1:-0}" want_memory="${2:-0}" want_context="${3:-0}"
-  local hub web audit portal memory context
+  local want_agents="${4:-0}" want_llm="${5:-0}"
+  local hub web audit portal memory context gateway ads llm
+  gateway="$(abs_dir "${PROBA_GATEWAY_DIR:-../../proba-llm-gateway}")" || true
+  ads="$(abs_dir "${PROBA_ADS_DIR:-../../ad-domain}")" || true
+  llm="$(abs_dir "${PROBA_LLM_DIR:-../../proba-llm}")" || true
+  if [ "$want_agents" = "1" ] && [ -z "$gateway" ]; then die "proba-llm-gateway checkout not found at ${PROBA_GATEWAY_DIR:-../../proba-llm-gateway} (set PROBA_GATEWAY_DIR in local/.env)"; fi
+  if [ "$want_agents" = "1" ] && [ -z "$ads" ]; then die "ad-domain checkout not found at ${PROBA_ADS_DIR:-../../ad-domain} (set PROBA_ADS_DIR in local/.env)"; fi
+  if [ "$want_llm" = "1" ] && [ -z "$llm" ]; then die "proba-llm checkout not found at ${PROBA_LLM_DIR:-../../proba-llm} (set PROBA_LLM_DIR in local/.env)"; fi
   hub="$(abs_dir "${PROBA_HUB_DIR:-../../proba-hub}")" || true
   web="$(abs_dir "${PROBA_WEB_DIR:-../../proba-web}")" || true
   audit="$(abs_dir "${PROBA_AUDIT_DIR:-../../proba-audit}")" || true
@@ -163,7 +175,8 @@ resolve_sources() {
     worktree)
       info "building from the working trees of the sibling checkouts (PROBA_SRC=worktree)"
       HUB_SRC="$hub"; WEB_SRC="$web"; AUDIT_SRC="$audit"; PORTAL_SRC="$portal"
-      MEMORY_SRC="${memory:-$SRC_DIR/proba-memory}"; CONTEXT_SRC="${context:-$SRC_DIR/proba-context}" ;;
+      MEMORY_SRC="${memory:-$SRC_DIR/proba-memory}"; CONTEXT_SRC="${context:-$SRC_DIR/proba-context}"
+      GATEWAY_SRC="${gateway:-$SRC_DIR/proba-llm-gateway}"; ADS_SRC="${ads:-$SRC_DIR/ad-domain}"; LLM_SRC="${llm:-$SRC_DIR/proba-llm}" ;;
     main)
       info "snapshotting ${PROBA_REF:-origin/main} of the sibling checkouts into local/.src (PROBA_SRC=main)"
       snapshot_repo proba-hub "$hub" || die "cannot snapshot proba-hub"
@@ -171,13 +184,19 @@ resolve_sources() {
       snapshot_repo proba-audit "$audit" || die "cannot snapshot proba-audit"
       HUB_SRC="$SRC_DIR/proba-hub"; WEB_SRC="$SRC_DIR/proba-web"; AUDIT_SRC="$SRC_DIR/proba-audit"
       PORTAL_SRC="$SRC_DIR/proba-portal"; MEMORY_SRC="$SRC_DIR/proba-memory"; CONTEXT_SRC="$SRC_DIR/proba-context"
+      GATEWAY_SRC="$SRC_DIR/proba-llm-gateway"; ADS_SRC="$SRC_DIR/ad-domain"; LLM_SRC="$SRC_DIR/proba-llm"
+      if [ "$want_agents" = "1" ]; then
+        snapshot_repo proba-llm-gateway "$gateway" || die "cannot snapshot proba-llm-gateway"
+        snapshot_repo ad-domain "$ads" || die "cannot snapshot ad-domain"
+      fi
+      if [ "$want_llm" = "1" ]; then snapshot_repo proba-llm "$llm" || die "cannot snapshot proba-llm"; fi
       if [ "$want_portal" = "1" ] && [ -n "$portal" ]; then snapshot_repo proba-portal "$portal" || true; fi
       if [ "$want_memory" = "1" ]; then snapshot_repo proba-memory "$memory" || die "cannot snapshot proba-memory"; fi
       if [ "$want_context" = "1" ]; then snapshot_repo proba-context "$context" || die "cannot snapshot proba-context"; fi ;;
     *) die "PROBA_SRC must be main or worktree (got $mode)" ;;
   esac
   [ -f "$AUDIT_SRC/Dockerfile" ] || die "no Dockerfile in $AUDIT_SRC"
-  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC
+  export HUB_SRC WEB_SRC AUDIT_SRC PORTAL_SRC MEMORY_SRC CONTEXT_SRC GATEWAY_SRC ADS_SRC LLM_SRC
 }
 
 # Generate Ed25519 pairs into local/keys/ (once) and write container paths into local/.env.

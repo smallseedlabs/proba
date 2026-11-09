@@ -31,7 +31,7 @@ jobs:
       - name: Check local/docker-compose.yml
         run: |
           node scripts/check-compose-security.mjs \
-            --public FIREBASE_API_KEY \
+            --public FIREBASE_API_KEY,CONTEXT_MAX_BUDGET_TOKENS \
             --optional MEMORY_EMBEDDER_API_KEY,MEMORY_LLM_API_KEY \
             --composite AUDIT_API_STATIC_TOKENS,MEMORY_API_STATIC_TOKENS \
             local/docker-compose.yml

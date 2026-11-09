@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Generate local-only Ed25519 key pairs for the context bridge and Hub act-as assertions.
+ * Generate local-only Ed25519 key pairs for the context bridge, Hub act-as assertions and the agents profile
+ * (Hub -> gateway service tokens, gateway -> llm/ads service tokens). Existing files are never overwritten.
  * Writes PEM private keys and public JWKS under local/keys/. Never commit the output.
  *
  * Usage: node local/tools/generate-context-keys.mjs [keys-dir]
@@ -32,6 +33,8 @@ function writePair(name, kid) {
 mkdirSync(keysDir, { recursive: true, mode: 0o700 });
 const hub = writePair('hub-assertion', 'hub-key-1');
 const bridge = writePair('context-service', 'bridge-key-1');
+const hubGateway = writePair('hub-gateway-service', 'hub-gw-1');
+const gatewayLlm = writePair('gateway-llm', 'gateway-llm-1');
 
 process.stdout.write(
   JSON.stringify(
@@ -45,6 +48,10 @@ process.stdout.write(
       CONTEXT_SERVICE_KEY_ID: bridge.kid,
       // Alias used by verify-context.sh for minting act-as assertions.
       CONTEXT_ASSERTION_PRIVATE_KEY_FILE: hub.pemPath,
+      HUB_GATEWAY_PRIVATE_KEY_FILE: hubGateway.pemPath,
+      HUB_GATEWAY_KEY_ID: hubGateway.kid,
+      GATEWAY_LLM_PRIVATE_KEY_FILE: gatewayLlm.pemPath,
+      GATEWAY_LLM_KEY_ID: gatewayLlm.kid,
     },
     null,
     2

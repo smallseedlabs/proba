@@ -10,6 +10,8 @@
 #   audit-api (read API, static local token) ; profile "portal": Proba Insights (the insights portal)
 #   profile "memory": memory-postgres (pgvector) <- memory-ingestor reads proba.audit.events; memory-api (read API), memory-jobs
 #   profile "context": context-postgres <- context-migrate; context-api (port 3500); Hub CONTEXT_BRIDGE_URL + Ed25519 keys under local/keys
+#   profile "agents": gateway (proba-llm-gateway, 3700) -> context-api, ads (ad-domain, 3800) <- ads-postgres; Hub GATEWAY_URL
+#   profile "llm": llm (proba-llm, 3600), the only service that calls a paid model; opt in with ./up.sh --llm (never by default)
 #
 # Use the scripts (they load local/.env, pick the source snapshots and check ports):
 #   ./up.sh   ./status.sh   ./seed.sh   ./verify.sh   ./down.sh   ./reset.sh
@@ -214,6 +216,16 @@ services:
       HUB_ASSERTION_PUBLIC_KEY_FILE: ${HUB_ASSERTION_PUBLIC_KEY_FILE:-}
       HUB_ASSERTION_KEY_ID: ${HUB_ASSERTION_KEY_ID:-hub-key-1}
       CONTEXT_SERVICE_PUBLIC_KEY_FILE: ${CONTEXT_SERVICE_PUBLIC_KEY_FILE:-}
+      # Gateway orchestration (./up.sh --agents sets PROBA_GATEWAY_URL for that run only; empty = gateway off, Hub unchanged).
+      GATEWAY_URL: ${PROBA_GATEWAY_URL:-}
+      GATEWAY_TIMEOUT_MS: ${GATEWAY_TIMEOUT_MS:-90000}
+      HUB_GATEWAY_PRIVATE_KEY_FILE: ${HUB_GATEWAY_PRIVATE_KEY_FILE:?set HUB_GATEWAY_PRIVATE_KEY_FILE}
+      HUB_GATEWAY_KEY_ID: ${HUB_GATEWAY_KEY_ID:-hub-gw-1}
+      HUB_GATEWAY_TOKEN_TTL_SECONDS: ${HUB_GATEWAY_TOKEN_TTL_SECONDS:-120}
+      # Analytics and action bot: scheduled reviews stay OFF locally unless you set ANALYTICS_SCHEDULE_ENABLED=true.
+      ANALYTICS_SCHEDULE_ENABLED: ${ANALYTICS_SCHEDULE_ENABLED:-false}
+      ANALYTICS_REVIEW_CADENCE_MS: ${ANALYTICS_REVIEW_CADENCE_MS:-21600000}
+      ANALYTICS_SCHEDULER_TICK_MS: ${ANALYTICS_SCHEDULER_TICK_MS:-300000}
     volumes:
       - ./keys:/run/proba/keys:ro
     ports:
@@ -579,9 +591,165 @@ services:
       - "127.0.0.1:${CONTEXT_API_HOST_PORT:-3500}:3500"
     restart: unless-stopped
 
+  # ------------------------------------------------------------------ profile "agents"
+  # The analytics and action bot: proba-llm-gateway orchestrates, ad-domain owns campaigns. Opt in with `./up.sh --agents`
+  # (implies --context). Both run NODE_ENV=production so their production guards apply locally too.
+  # SAFETY: REDDIT_ADS_ENABLED defaults to false (ads answers provider_unconfigured, nothing reaches Reddit), and
+  # RESEARCH_HTTP_FETCH defaults to false. The gateway reaches a model only through the "llm" profile, which is never started
+  # by --agents: with it off every model call fails closed.
+  ads-postgres:
+    profiles: ["agents"]
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    container_name: proba-local-ads-postgres
+    environment:
+      POSTGRES_USER: proba
+      POSTGRES_PASSWORD: ${ADS_POSTGRES_PASSWORD:?run ./up.sh --agents (it creates local/.env with generated secrets)}
+      POSTGRES_DB: ad_domain
+    ports:
+      - "127.0.0.1:${ADS_POSTGRES_HOST_PORT:-55437}:5432"
+    volumes:
+      - ads_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proba -d ad_domain"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ads:
+    profiles: ["agents"]
+    build:
+      context: ${ADS_SRC:-.src/ad-domain}
+    image: ${ADS_IMAGE:-proba-local/ads:dev}
+    container_name: proba-local-ads
+    depends_on:
+      ads-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3800
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://proba:${ADS_POSTGRES_PASSWORD:?run ./up.sh --agents (it creates local/.env with generated secrets)}@ads-postgres:5432/ad_domain
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}@redis:6379
+      AUDIT_PUBLISHER: redis
+      AUDIT_STREAM: proba.audit.events
+      CALLER_ISSUERS: proba-gateway
+      CALLER_SUBJECTS: gateway
+      GATEWAY_SERVICE_PUBLIC_KEY_FILE: /run/proba/keys/gateway-llm.public.jwks.json
+      # closed (default) refuses campaign creates; gateway_attested accepts research the gateway attested. See LOCAL_TESTING.md.
+      ADS_RESEARCH_ACCEPTANCE_MODE: ${ADS_RESEARCH_ACCEPTANCE_MODE:-closed}
+      ADS_MAX_DAILY_BUDGET: ${ADS_MAX_DAILY_BUDGET:-}
+      ADS_MAX_DAILY_BUDGET_CURRENCY: ${ADS_MAX_DAILY_BUDGET_CURRENCY:-}
+      # Reddit adapter: OFF unless you set REDDIT_ADS_ENABLED=true. The token is a FILE under local/keys/ (gitignored).
+      REDDIT_ADS_ENABLED: ${REDDIT_ADS_ENABLED:-false}
+      REDDIT_AD_ACCOUNT_ID: ${REDDIT_AD_ACCOUNT_ID:-}
+      REDDIT_ACCESS_TOKEN_FILE: ${REDDIT_ACCESS_TOKEN_FILE:-}
+      REDDIT_CONVERSION_PIXEL_ID: ${REDDIT_CONVERSION_PIXEL_ID:-}
+    volumes:
+      - ./keys:/run/proba/keys:ro
+    ports:
+      - "127.0.0.1:${ADS_HOST_PORT:-3800}:3800"
+    restart: unless-stopped
+
+  gateway:
+    profiles: ["agents"]
+    build:
+      context: ${GATEWAY_SRC:-.src/proba-llm-gateway}
+    image: ${GATEWAY_IMAGE:-proba-local/gateway:dev}
+    container_name: proba-local-gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+      context-api:
+        condition: service_started
+      ads:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3700
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CALLER_ISSUERS: proba-hub
+      CALLER_SUBJECTS: hub
+      HUB_SERVICE_PUBLIC_KEY_FILE: /run/proba/keys/hub-gateway-service.public.jwks.json
+      HUB_ASSERTION_PUBLIC_KEY_FILE: /run/proba/keys/hub-assertion.public.jwks.json
+      # One signing key for gateway -> llm and gateway -> ads tokens (different audiences: proba-llm, proba-ads).
+      GATEWAY_LLM_PRIVATE_KEY_FILE: ${GATEWAY_LLM_PRIVATE_KEY_FILE:?set GATEWAY_LLM_PRIVATE_KEY_FILE}
+      GATEWAY_LLM_KEY_ID: ${GATEWAY_LLM_KEY_ID:-gateway-llm-1}
+      LLM_BASE_URL: http://llm:3600
+      LLM_ALLOWED_HOSTS: llm:3600
+      LLM_QUOTA_UNKNOWN_POLICY: ${LLM_QUOTA_UNKNOWN_POLICY:-allow_with_run_budget}
+      CONTEXT_BRIDGE_URL: http://context-api:3500
+      CONTEXT_ALLOWED_HOSTS: context-api:3500
+      # Token budget offered to the context bridge per run (a number, not a secret: see --public in ci.yml). Unset = every run refuses.
+      CONTEXT_MAX_BUDGET_TOKENS: ${CONTEXT_MAX_BUDGET_TOKENS:-4000}
+      ADS_DOMAIN_URL: http://ads:3800
+      ADS_DOMAIN_ALLOWED_HOSTS: ads:3800
+      RESEARCH_HTTP_FETCH: ${RESEARCH_HTTP_FETCH:-false}
+      GATEWAY_MAX_COST_USD: ${GATEWAY_MAX_COST_USD:-}
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}@redis:6379
+      AUDIT_PUBLISHER: redis
+      AUDIT_STREAM: proba.audit.events
+      RUN_STORE_DIR: /app/data/runs
+      RESEARCH_STORE_DIR: /app/data/research
+      ANALYTICS_STORE_DIR: /app/data/analytics
+      ACTION_POLICY_STORE_DIR: /app/data/action-policy
+      ACTION_OUTCOME_STORE_DIR: /app/data/action-outcomes
+    volumes:
+      - ./keys:/run/proba/keys:ro
+      - gateway_data:/app/data
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-3700}:3700"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ profile "llm"
+  # proba-llm: the ONLY service that calls a paid model (DeepSeek). Never started by --agents; opt in with `./up.sh --llm`.
+  # The provider key is a FILE under local/keys/ (gitignored), never a value in local/.env or in this file.
+  llm:
+    profiles: ["llm"]
+    build:
+      context: ${LLM_SRC:-.src/proba-llm}
+    image: ${LLM_IMAGE:-proba-local/llm:dev}
+    container_name: proba-local-llm
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3600
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LLM_PROVIDER: deepseek
+      LLM_BASE_URL: https://api.deepseek.com
+      LLM_ALLOWED_HOSTS: api.deepseek.com
+      LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
+      LLM_ALLOWED_MODELS: ${LLM_MODEL:-deepseek-flash}
+      LLM_THINKING: ${LLM_THINKING:-disabled}
+      LLM_API_KEY_FILE: ${LLM_API_KEY_FILE:?set LLM_API_KEY_FILE}
+      PRICE_PROMPT_USD_PER_MILLION: ${PRICE_PROMPT_USD_PER_MILLION:-}
+      PRICE_COMPLETION_USD_PER_MILLION: ${PRICE_COMPLETION_USD_PER_MILLION:-}
+      CALLER_ISSUERS: proba-gateway
+      CALLER_SUBJECTS: gateway
+      GATEWAY_SERVICE_PUBLIC_KEY_FILE: /run/proba/keys/gateway-llm.public.jwks.json
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}@redis:6379
+      AUDIT_PUBLISHER: redis
+      AUDIT_STREAM: proba.audit.events
+      TURN_STORE_DIR: /app/data/turns
+    volumes:
+      - ./keys:/run/proba/keys:ro
+      - llm_data:/app/data
+    ports:
+      - "127.0.0.1:${LLM_HOST_PORT:-3600}:3600"
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
   clickhouse_data:
   memory_postgres_data:
   context_postgres_data:
+  ads_postgres_data:
+  gateway_data:
+  llm_data:
