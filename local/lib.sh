@@ -35,6 +35,12 @@ GENERATED_SECRETS="JWT_SECRET POSTGRES_PASSWORD CLICKHOUSE_PASSWORD AUDIT_API_LO
 
 # Create local/.env from the example on first run and fill the secrets with random,
 # local-only values. Existing values are never overwritten. Nothing is printed.
+# Make sure a file ends with a newline before anything is appended to it.
+env_end_newline() {
+  [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ] && printf '\n' >> "$1"
+  return 0
+}
+
 ensure_env() {
   local f="$LOCAL_DIR/.env"
   mkdir -p "$LOCAL_DIR/keys" "$LOCAL_DIR/.reports"
@@ -60,6 +66,8 @@ ensure_env() {
     fi
   done
   # Settings added after a local/.env was first created: append the local default, never touch a value that exists.
+  # A hand-edited local/.env may lack a final newline; add one so an appended line never joins the last value.
+  env_end_newline "$f"
   local def
   for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse AUDIT_CONTENT_MASK_PII=true \
              "PORTAL_MEMORY_URL=http://127.0.0.1:3420" REDIS_USER=proba \
@@ -243,6 +251,7 @@ AUDIT_API_CONTEXT_READER_ENABLED=true
 MEMORY_API_CONTEXT_READER_ENABLED=true
 CONTEXT_POSTGRES_PASSWORD="
   local line key val
+  env_end_newline "$f"
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     key="${line%%=*}"; val="${line#*=}"
