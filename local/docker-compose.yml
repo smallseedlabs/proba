@@ -663,6 +663,13 @@ services:
       REDDIT_AD_ACCOUNT_ID: ${REDDIT_AD_ACCOUNT_ID:-}
       REDDIT_ACCESS_TOKEN_FILE: ${REDDIT_ACCESS_TOKEN_FILE:-}
       REDDIT_CONVERSION_PIXEL_ID: ${REDDIT_CONVERSION_PIXEL_ID:-}
+      # Read-only scheduled Reddit report sync for mapped active/paused campaigns (system-initiated broker
+      # tokens) -> metrics.ingested audit events -> Portal Analytics. Follows REDDIT_ADS_ENABLED unless set;
+      # never mutates campaigns or spends. First run ADS_METRICS_SYNC_INITIAL_DELAY_SECONDS after start.
+      ADS_METRICS_SYNC_ENABLED: ${ADS_METRICS_SYNC_ENABLED:-${REDDIT_ADS_ENABLED:-false}}
+      ADS_METRICS_SYNC_INTERVAL_SECONDS: ${ADS_METRICS_SYNC_INTERVAL_SECONDS:-900}
+      ADS_METRICS_SYNC_INITIAL_DELAY_SECONDS: ${ADS_METRICS_SYNC_INITIAL_DELAY_SECONDS:-60}
+      ADS_METRICS_SYNC_LOOKBACK_DAYS: ${ADS_METRICS_SYNC_LOOKBACK_DAYS:-2}
     volumes:
       - ./keys:/run/proba/keys:ro
     ports:
