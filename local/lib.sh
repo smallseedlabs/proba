@@ -72,7 +72,7 @@ ensure_env() {
   for def in AUDIT_CONTENT_ENABLED=true AUDIT_CONTENT_STORE=clickhouse AUDIT_CONTENT_MASK_PII=true \
              "PORTAL_MEMORY_URL=http://127.0.0.1:3420" REDIS_USER=proba \
              CLICKHOUSE_CONSUMER_USER=proba_consumer CLICKHOUSE_API_USER=proba_api CLICKHOUSE_MIGRATOR_USER=proba_migrator \
-             AUDIT_STREAM_MAX_AGE_HOURS=72 \
+             AUDIT_STREAM_MAX_AGE_HOURS=72 GATEWAY_MAX_TOTAL_TOKENS=400000 \
              HUB_ASSERTION_PRIVATE_KEY_FILE=/run/proba/keys/hub-assertion.private.pem \
              CONTEXT_SERVICE_PRIVATE_KEY_FILE=/run/proba/keys/context-service.private.pem \
              HUB_GATEWAY_PRIVATE_KEY_FILE=/run/proba/keys/hub-gateway-service.private.pem \
@@ -111,6 +111,7 @@ load_env() {
   for gk in $GENERATED_SECRETS CONTEXT_POSTGRES_PASSWORD; do
     [ -n "${!gk:-}" ] || export "$gk=not-generated-run-up.sh"
   done
+  [ -n "${GATEWAY_MAX_TOTAL_TOKENS:-}" ] || export GATEWAY_MAX_TOTAL_TOKENS=400000
   : "${WEB_HOST_PORT:=5180}" "${HUB_HOST_PORT:=3300}" "${POSTGRES_HOST_PORT:=55433}" "${REDIS_HOST_PORT:=56380}"
   : "${CLICKHOUSE_HTTP_HOST_PORT:=58125}" "${AUDIT_CONSUMER_HOST_PORT:=3401}" "${METRICS_INGESTER_HOST_PORT:=3402}"
   : "${ROLLUP_HOST_PORT:=3403}" "${AUDIT_API_HOST_PORT:=3400}" "${PORTAL_HOST_PORT:=3410}"
