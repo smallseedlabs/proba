@@ -248,6 +248,14 @@ Postgres on 55437) from `origin/main` snapshots, and points the Hub at the gatew
   Reddit ad account. Ads maps the connected account (`ads.provider_accounts`) itself before each action. Note: ad-domain creates Reddit
   campaigns, ad groups and ads as `ACTIVE`, so an approved create can start spending at once. Debugging fallback without the Marketing
   login: `REDDIT_TOKEN_SOURCE=file` with `REDDIT_AD_ACCOUNT_ID` and `REDDIT_ACCESS_TOKEN_FILE=/run/proba/keys/<file>`.
+* **Reddit metrics sync (read-only).** With `REDDIT_ADS_ENABLED=true`, ads also runs a scheduled report sync
+  (`ADS_METRICS_SYNC_ENABLED` follows it unless set; set `false` to turn it off). First run 60 s after ads starts, then every
+  `ADS_METRICS_SYNC_INTERVAL_SECONDS` (local default 900). Each run reads day reports from UTC midnight two days ago
+  (`ADS_METRICS_SYNC_LOOKBACK_DAYS`) to the current hour for every mapped `active`/`paused` Reddit campaign, with a system-initiated
+  broker token for that campaign's workspace. It never mutates or spends. Check it in the Portal Audit Explorer: `service=ads`,
+  `system.job_run` (`details.job=ads.metrics_sync`, per-campaign counts), `metrics.ingested` per day row, `metrics.fetch_failed` with
+  the refusal code; then Portal **Analytics** (platform `reddit`). Reddit reports lag by a few hours; rows without a conversion count are
+  quarantined (reported in `metrics.fetch_completed`), not stored as zero.
 
 ## Marketing (ad platform connections)
 
