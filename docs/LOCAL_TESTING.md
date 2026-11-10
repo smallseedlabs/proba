@@ -239,6 +239,9 @@ Postgres on 55437) from `origin/main` snapshots, and points the Hub at the gatew
 * **Production guards apply.** gateway, ads and llm run `NODE_ENV=production`: Redis audit publisher, host allow-lists, no test fakes.
 * **Live model (`--llm`, PAID).** Put the DeepSeek key in `local/keys/llm_api_key` (one line, `chmod 600`) and set the
   `PRICE_*_USD_PER_MILLION` values in `local/.env` so the gateway cost cap (`GATEWAY_MAX_COST_USD`) can be enforced. Then `./up.sh ... --llm`.
+  The cap is checked before every model call: proba-llm serves the prices on `/v1/pricing`, and the gateway bounds the next call by
+  `GATEWAY_MAX_TOTAL_TOKENS` (default 400000 per run). If either is missing, runs are refused with `preflight_blocked` and the reason
+  is shown in the thread, logged by the gateway ("run blocked by preflight") and audited as `policy.denied`.
 * **Live Reddit (SPENDS MONEY).** Connect Reddit in the web **Marketing** section first (below). Then, in `local/.env`:
   `REDDIT_ADS_ENABLED=true`, `REDDIT_TOKEN_SOURCE=broker` (default), `REDDIT_CONVERSION_PIXEL_ID`,
   `ADS_RESEARCH_ACCEPTANCE_MODE=gateway_attested`, and a spend cap (`ADS_MAX_DAILY_BUDGET` + `ADS_MAX_DAILY_BUDGET_CURRENCY`); and a funded

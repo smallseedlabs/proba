@@ -705,6 +705,10 @@ services:
       ADS_DOMAIN_ALLOWED_HOSTS: ads:3800
       RESEARCH_HTTP_FETCH: ${RESEARCH_HTTP_FETCH:-false}
       GATEWAY_MAX_COST_USD: ${GATEWAY_MAX_COST_USD:-}
+      # A USD cap needs a bounded next call: the gateway prices the remaining prompt tokens, so without a total or
+      # prompt token cap every run is refused as "unbounded". Numbers, not secrets.
+      # up.sh fills the local default (400000 per run) into local/.env.
+      GATEWAY_MAX_TOTAL_TOKENS: ${GATEWAY_MAX_TOTAL_TOKENS:?run ./up.sh (it adds GATEWAY_MAX_TOTAL_TOKENS to local/.env)}
       REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?run ./up.sh (it creates local/.env with generated secrets)}@redis:6379
       AUDIT_PUBLISHER: redis
       AUDIT_STREAM: proba.audit.events
@@ -746,6 +750,8 @@ services:
       LLM_API_KEY_FILE: ${LLM_API_KEY_FILE:?set LLM_API_KEY_FILE}
       PRICE_PROMPT_USD_PER_MILLION: ${PRICE_PROMPT_USD_PER_MILLION:-}
       PRICE_COMPLETION_USD_PER_MILLION: ${PRICE_COMPLETION_USD_PER_MILLION:-}
+      # Optional label for the price table (proba-llm derives env:<prompt>/<completion> when empty); served on /v1/pricing.
+      PRICING_VERSION: ${PRICING_VERSION:-}
       CALLER_ISSUERS: proba-gateway
       CALLER_SUBJECTS: gateway
       GATEWAY_SERVICE_PUBLIC_KEY_FILE: /run/proba/keys/gateway-llm.public.jwks.json
