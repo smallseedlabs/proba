@@ -77,11 +77,11 @@ All of the following were merged to **`main`** (some earlier PRs were first merg
 
 **Fix PRs opened after the clean-slate test on 14 Nov (merge these next, still targeting `main`, no stacking):**
 
-- Gateway: truncated model replies (`finishReason: length`) must not complete with an empty card; retry once with the remaining completion budget and a concise-continue nudge; default `GATEWAY_MAX_COMPLETION_TOKENS=4000`. The 512 `responseTokenReserve` is a **context** reserve only; it was wrongly used as a per-call output cap and cut off `creative.draft_post` in gateway run `2a478a37` (request budget was already 1500, but `maxTokens` sent to the model was 512).
-- Hub: default `BRAIN_MAX_OUTPUT_TOKENS` raised from 1500 to 4000 (tighten-only; this is the run budget Hub sends the gateway for planning/drafting).
-- This umbrella repo: compose now passes `FIREBASE_PROJECT_ID`, `GATEWAY_ADMIN_EMAILS`, `GATEWAY_CORS_ORIGINS` into the gateway so Portal Guardrails is configured without a secret in git; this handoff is refreshed.
+- [gateway #22](https://github.com/smallseedlabs/proba-llm-gateway/pull/22): truncated model replies (`finishReason: length`) must not complete with an empty card; retry once with the remaining completion budget and a concise-continue nudge; default `GATEWAY_MAX_COMPLETION_TOKENS=4000`. The 512 `responseTokenReserve` is a **context** reserve only; it was wrongly used as a per-call output cap and cut off `creative.draft_post` in gateway run `2a478a37` (request budget was already 1500, but `maxTokens` sent to the model was 512).
+- [hub #54](https://github.com/smallseedlabs/proba-hub/pull/54): default `BRAIN_MAX_OUTPUT_TOKENS` raised from 1500 to 4000 (tighten-only; this is the run budget Hub sends the gateway for planning/drafting).
+- [proba #28](https://github.com/smallseedlabs/proba/pull/28): compose now passes `FIREBASE_PROJECT_ID`, `GATEWAY_ADMIN_EMAILS`, `GATEWAY_CORS_ORIGINS` into the gateway so Portal Guardrails is configured without a secret in git; this handoff is refreshed.
 
-Confirm the new PR numbers on GitHub when you pick this up; they were not merged at the time of writing.
+These were open, not merged, at the time of writing.
 
 ---
 
