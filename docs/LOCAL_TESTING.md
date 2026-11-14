@@ -156,6 +156,9 @@ The portal signs in with **Firebase** and sends the ID token to the audit API, s
    (read access). The static local token is for scripts only and cannot sign anyone in to a browser. `up.sh --portal` warns if either is missing.
 
 `PORTAL_MEMORY_URL` (optional) turns on the Memory entry in the portal's navigation; leave it empty for no entry. `PORTAL_LOG_LEVEL` sets its browser log level.
+
+The Portal **Guardrails** screen calls the gateway at `GET/PUT http://127.0.0.1:3700/v1/admin/guardrails` with the signed-in Firebase ID token. The gateway service must have `FIREBASE_PROJECT_ID` and `GATEWAY_ADMIN_EMAILS` (compose falls back to `AUDIT_API_ADMIN_EMAILS`) and must allow the Portal origin in `GATEWAY_CORS_ORIGINS` (local default `http://127.0.0.1:3410,http://localhost:3410`). If `FIREBASE_PROJECT_ID` is empty the endpoint returns `503 admin_unconfigured` and the screen fails. These values come from `local/.env`; do not put them in git. After changing them, recreate the gateway container or, in native debug, restart gateway so it reloads env (`node local/debug/debug.mjs down gateway && node local/debug/debug.mjs up gateway`). Native debug also fills any missing keys from `local/.env`, and `restore-to-main.sh` keeps `local/debug/overrides/gateway.env` if you have one.
+
 After `./seed.sh` there is audit history and analytics data to look at. `./status.sh` reports the portal's health when its container exists.
 
 By default the portal is built from a snapshot of `origin/main` of your `proba-portal` checkout. To try an unmerged branch use `PROBA_SRC=worktree ./up.sh --portal`, or `PROBA_REF=origin/<branch> ./up.sh --portal` (repositories without that branch fall back to `main`).
